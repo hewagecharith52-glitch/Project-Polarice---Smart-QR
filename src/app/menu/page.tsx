@@ -2,11 +2,11 @@
 
 import { useState, useMemo, useEffect, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { MenuItem } from "@/config/restaurant.config";
+import MenuItemCard, { MenuItem as CardMenuItem } from "@/components/MenuItemCard";
 
 import {
-  Search, ShoppingBag, Plus, Minus, Clock, Flame, Leaf, ChefHat,
-  CheckCircle, UtensilsCrossed, X, Star, AlertCircle
+  Search, ShoppingBag, Plus, Minus, Clock,
+  CheckCircle, UtensilsCrossed, X, Star, AlertCircle, ChefHat
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import confetti from "canvas-confetti";
@@ -23,12 +23,6 @@ type CartItem = {
   is_new?: boolean;
   notes?: string;
   cartItemId: string;
-};
-
-const tagConfig: Record<string, { icon: any; color: string; bg: string }> = {
-  Spicy: { icon: Flame, color: "text-red-500", bg: "bg-red-50 border-red-100" },
-  Veg: { icon: Leaf, color: "text-emerald-500", bg: "bg-emerald-50 border-emerald-100" },
-  Popular: { icon: ChefHat, color: "text-orange-500", bg: "bg-orange-50 border-orange-100" },
 };
 
 function MenuContent() {
@@ -70,10 +64,6 @@ function MenuContent() {
   const [ticketNumber, setTicketNumber] = useState("");
   const [placedOrderId, setPlacedOrderId] = useState<string | null>(null);
 
-  const [selectedMenuItem, setSelectedMenuItem] = useState<MenuItem | null>(null);
-  const [itemNotes, setItemNotes] = useState("");
-  const [itemQuantity, setItemQuantity] = useState(1);
-
   // Review / Feedback Modal State
   const [isReviewModalOpen, setIsReviewModalOpen] = useState(false);
   const [foodRating, setFoodRating] = useState(5);
@@ -85,7 +75,7 @@ function MenuContent() {
   const [uiToast, setUiToast] = useState<{ text: string; type: "success" | "error" } | null>(null);
 
   // Lock background scroll when any modal or cart drawer is open
-  const isAnyModalOpen = Boolean(isCartOpen || isReviewModalOpen || isTableSelectorOpen || selectedMenuItem);
+  const isAnyModalOpen = Boolean(isCartOpen || isReviewModalOpen || isTableSelectorOpen);
   useEffect(() => {
     if (isAnyModalOpen) {
       document.body.style.overflow = "hidden";
@@ -102,7 +92,7 @@ function MenuContent() {
     setTimeout(() => setUiToast(null), 4000);
   };
 
-  const [dbMenu, setDbMenu] = useState<MenuItem[]>([]);
+  const [dbMenu, setDbMenu] = useState<any[]>([]);
 
   // Optimized Cache-First Data Fetching
   useEffect(() => {
@@ -119,13 +109,13 @@ function MenuContent() {
       try {
         const { data } = await supabase
           .from("menu_items")
-          .select("id, name, price, description, image_url, category, tags, prep_time_minutes")
+          .select("*")
           .eq("is_available", true)
           .order("category")
           .order("name");
 
         if (isMounted && data) {
-          setDbMenu(data as MenuItem[]);
+          setDbMenu(data);
           sessionStorage.setItem("cached_menu_data", JSON.stringify(data));
         }
       } catch (err) {
@@ -148,60 +138,120 @@ function MenuContent() {
     };
   }, []);
 
-  const categories = useMemo(() => {
-    const items = Array.isArray(dbMenu) ? dbMenu : [];
-    const cats = Array.from(new Set(items.map((item: any) => item.category).filter(Boolean)));
-    return ["All", ...cats];
+  // Groups Regular and Large items seamlessly into a single card object
+  const groupedMenu = useMemo(() => {
+    const map = new Map<string, CardMenuItem>();
+
+    dbMenu.forEach((item) => {
+      const isRegular = item.name.includes("(Regular)");
+      const isLarge = item.name.includes("(Large)");
+
+      if (isRegular || isLarge) {
+        const baseName = item.name.replace(/\s*\((Regular|Large)\)\s*/gi, "").trim();
+        const groupKey = `${item.category}-${baseName}`;
+
+        if (!map.has(groupKey)) {
+          map.set(groupKey, {
+            id: item.id,
+            name: baseName,
+            description: item.description,
+            price: Number(item.price),
+            category: item.category,
+            image_url: item.image_url,
+            is_veg: item.is_veg,
+            is_spicy: item.is_spicy,
+            is_popular: item.is_popular,
+            is_available: item.is_available,
+          });
+        }
+
+        const existing = map.get(groupKey)!;
+        if (isLarge) {
+          existing.large_item = {
+            id: item.id,
+            name: item.name,
+            description: item.description,
+            price: Number(item.price),
+            category: item.category,
+            image_url: item.image_url,
+          };
+        } else if (isRegular) {
+          existing.id = item.id;
+          existing.name = item.name;
+          existing.price = Number(item.price);
+        }
+      } else {
+        map.set(item.id, {
+          id: item.id,
+          name: item.name,
+          description: item.description,
+          price: Number(item.price),
+          category: item.category,
+          image_url: item.image_url,
+          is_veg: item.is_veg,
+          is_spicy: item.is_spicy,
+          is_popular: item.is_popular,
+          is_available: item.is_available,
+        });
+      }
+    });
+
+    return Array.from(map.values());
   }, [dbMenu]);
 
+  const categories = useMemo(() => {
+    const cats = Array.from(new Set(groupedMenu.map((item) => item.category).filter(Boolean)));
+    return ["All", ...cats];
+  }, [groupedMenu]);
+
   const filteredMenu = useMemo(() => {
-    const items = Array.isArray(dbMenu) ? dbMenu : [];
-    const cleanSearch = searchQuery.trim().toLowerCase();
-    return items.filter((item: any) => {
-      const matchesCategory = activeCategory === "All" || item.category === activeCategory;
-      const matchesSearch = !cleanSearch ||
-        item.name?.toLowerCase().includes(cleanSearch) ||
-        item.description?.toLowerCase().includes(cleanSearch);
-      return matchesCategory && matchesSearch;
-    });
-  }, [dbMenu, activeCategory, searchQuery]);
-
-  const cartQuantityMap = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const item of cart) {
-      map[item.id] = (map[item.id] || 0) + item.quantity;
+    let filtered = groupedMenu;
+    if (activeCategory !== "All") {
+      filtered = filtered.filter((item) => item.category === activeCategory);
     }
-    return map;
-  }, [cart]);
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      filtered = filtered.filter(
+        (item) => item.name.toLowerCase().includes(q) || (item.description && item.description.toLowerCase().includes(q))
+      );
+    }
+    return filtered;
+  }, [groupedMenu, activeCategory, searchQuery]);
 
-  const getQuantity = (id: string) => cartQuantityMap[id] || 0;
+  const handleAddCardToCart = (item: CardMenuItem, selectedSize: "Regular" | "Large", finalPrice: number) => {
+    let cartItemName = item.name;
+    if (item.large_item) {
+      cartItemName = `${item.name.replace(/\s*\((Regular|Large)\)\s*/gi, "").trim()} (${selectedSize})`;
+    }
 
-  const updateCartById = (id: string, name: string, price: number, delta: number, notes: string = "") => {
-    const cartItemId = `${id}-${notes}`;
+    const cartItemId = `${item.id}-${selectedSize}`;
+
     setCart((prev) => {
-      const existing = prev.find((i) => i.cartItemId === cartItemId);
+      const existing = prev.find((i) => i.name === cartItemName);
+      if (existing) {
+        return prev.map((i) => (i.name === cartItemName ? { ...i, quantity: i.quantity + 1 } : i));
+      }
+      return [...prev, { id: item.id, name: cartItemName, price: finalPrice, quantity: 1, cartItemId }];
+    });
+
+    showToast(`Added ${cartItemName} to cart`, "success");
+  };
+
+  const updateCartById = (name: string, delta: number) => {
+    setCart((prev) => {
+      const existing = prev.find((i) => i.name === name);
       if (existing) {
         const newQty = existing.quantity + delta;
-        if (newQty <= 0) return prev.filter((i) => i.cartItemId !== cartItemId);
-        return prev.map((i) => (i.cartItemId === cartItemId ? { ...i, quantity: newQty } : i));
-      }
-      if (delta > 0) {
-        return [...prev, { id, name, price, quantity: delta, notes, cartItemId }];
+        if (newQty <= 0) return prev.filter((i) => i.name !== name);
+        return prev.map((i) => (i.name === name ? { ...i, quantity: newQty } : i));
       }
       return prev;
     });
   };
 
-  const addToCartFromModal = () => {
-    if (!selectedMenuItem) return;
-    updateCartById(selectedMenuItem.id, selectedMenuItem.name, selectedMenuItem.price, itemQuantity, itemNotes);
-    setSelectedMenuItem(null);
-    setItemNotes("");
-    setItemQuantity(1);
-  };
-
   const taxPct = Number(settings?.tax_pct ?? 0);
   const serviceChargePct = Number(settings?.service_charge_pct ?? 10);
+  const currencySymbol = settings?.currency || "LKR";
 
   const cartTotal = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.quantity, 0), [cart]);
   const cartTax = (cartTotal * taxPct) / 100;
@@ -246,7 +296,6 @@ function MenuContent() {
         }));
         const mergedItems = [...existingItems, ...newItems];
 
-        // Recalculate full order totals consistently
         const mergedSubtotal = mergedItems.reduce((sum, it) => sum + (Number(it.price || 0) * Number(it.quantity || 1)), 0);
         const discount = Number(activeOrder.discount || 0);
         const discounted = Math.max(0, mergedSubtotal - discount);
@@ -377,7 +426,6 @@ function MenuContent() {
           </div>
 
           <form onSubmit={handleReviewSubmit} className="space-y-5">
-            {/* Food Rating */}
             <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-600">🍲 Food Quality</span>
@@ -400,7 +448,6 @@ function MenuContent() {
               </div>
             </div>
 
-            {/* Service Rating */}
             <div className="bg-slate-50 p-4 rounded-2xl border border-slate-100">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-xs font-bold uppercase tracking-wider text-slate-600">🤵 Waiter & Service</span>
@@ -423,7 +470,6 @@ function MenuContent() {
               </div>
             </div>
 
-            {/* Waiter Name & Customer Name */}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Waiter Name</label>
@@ -447,7 +493,6 @@ function MenuContent() {
               </div>
             </div>
 
-            {/* Comments */}
             <div>
               <label className="block text-[11px] font-bold text-slate-600 mb-1 uppercase tracking-wider">Comments or Suggestions</label>
               <textarea
@@ -636,18 +681,18 @@ function MenuContent() {
               placeholder="Search for delicious food..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full pl-14 pr-4 py-4 bg-white border border-slate-200 rounded-2xl text-sm focus:border-orange-500 focus:ring-4 focus:ring-orange-500/10 transition-all outline-none placeholder:text-slate-400 font-bold shadow-sm"
+              className="w-full pl-14 pr-4 py-3 bg-white border border-slate-200 rounded-2xl text-sm focus:border-orange-500 focus:ring-4 focus:ring-orange-500/10 transition-all outline-none placeholder:text-slate-400 font-bold shadow-sm"
             />
           </div>
         </div>
 
         {!searchQuery && (
-          <div className="flex overflow-x-auto px-5 pb-4 gap-3 no-scrollbar snap-x snap-mandatory scroll-smooth">
+          <div className="flex overflow-x-auto px-5 pb-4 gap-2 no-scrollbar scroll-smooth">
             {categories.map((cat) => (
               <button
                 key={cat}
                 onClick={() => setActiveCategory(cat)}
-                className={`px-5 py-2 sm:px-6 sm:py-2.5 rounded-2xl text-xs sm:text-sm font-bold whitespace-nowrap transition-all duration-300 shadow-sm snap-start ${activeCategory === cat
+                className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold whitespace-nowrap transition-all duration-300 shadow-sm shrink-0 cursor-pointer ${activeCategory === cat
                   ? "bg-gradient-to-r from-orange-500 to-orange-400 text-white shadow-orange-500/30 border-transparent"
                   : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
                   }`}
@@ -659,103 +704,16 @@ function MenuContent() {
         )}
       </div>
 
-      {/* Main Menu Grid */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 py-4 sm:py-6 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-6 overflow-x-hidden">
-        {filteredMenu.map((item) => {
-          const qty = getQuantity(item.id);
-          return (
-            <div
-              key={item.id}
-              onClick={() => {
-                setSelectedMenuItem(item);
-                setItemQuantity(1);
-                setItemNotes("");
-              }}
-              className="group bg-white border border-slate-100 rounded-2xl p-3 sm:p-5 flex flex-col gap-2 sm:gap-4 shadow-sm hover:shadow-lg transition-shadow cursor-pointer relative"
-            >
-              <div className="w-full h-28 sm:h-56 rounded-xl sm:rounded-2xl overflow-hidden relative bg-slate-100 shrink-0">
-                <img
-                  src={item.image_url && item.image_url.trim() !== "" ? item.image_url : "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&q=70"}
-                  alt={item.name}
-                  loading="lazy"
-                  decoding="async"
-                  className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
-                  onError={(e) => {
-                    e.currentTarget.src =
-                      "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&q=70";
-                  }}
-                />
-                <div className="absolute top-2 left-2 sm:top-3 sm:left-3 flex flex-wrap gap-1 sm:gap-2 pr-2 sm:pr-3 pointer-events-none">
-                  {item.prep_time_minutes && (
-                    <span className="flex items-center gap-1 sm:gap-1.5 text-[8px] sm:text-[10px] uppercase font-bold tracking-widest bg-slate-900/90 text-white px-2 py-1 sm:px-3 sm:py-1.5 rounded-lg sm:rounded-xl shadow-sm border border-slate-700">
-                      ⏱️ {item.prep_time_minutes}-{item.prep_time_minutes + 5}m
-                    </span>
-                  )}
-                  {item.tags &&
-                    item.tags.map((tag) => {
-                      const style = tagConfig[tag] || {
-                        icon: null,
-                        color: "text-slate-600",
-                        bg: "bg-white border-slate-200",
-                      };
-                      const Icon = style.icon;
-                      return (
-                        <span
-                          key={tag}
-                          className={`flex items-center gap-1 text-[8px] sm:text-[10px] uppercase font-bold tracking-widest ${style.bg} ${style.color} px-2 py-1 sm:px-3 sm:py-1.5 rounded-lg sm:rounded-xl shadow-sm bg-white border`}
-                        >
-                          {Icon && <Icon className="w-2.5 h-2.5 sm:w-3.5 sm:h-3.5" />}
-                          {tag}
-                        </span>
-                      );
-                    })}
-                </div>
-              </div>
-
-              <div className="flex flex-col flex-1 px-0.5 sm:px-1 min-w-0">
-                <h3 className="font-bold text-xs sm:text-2xl text-slate-900 mb-0.5 sm:mb-1.5 leading-tight line-clamp-1">{item.name}</h3>
-                <p className="text-[9px] sm:text-sm text-slate-500 line-clamp-2 leading-relaxed font-medium mb-2 sm:mb-5 hidden sm:block">
-                  {item.description}
-                </p>
-
-                <div className="mt-auto pt-2 sm:pt-3 border-t border-slate-100 flex flex-row items-center justify-between gap-1.5 sm:gap-2">
-                  <div className="flex flex-col min-w-0 shrink">
-                    <span className="text-[8px] sm:text-[10px] uppercase font-semibold text-slate-400 hidden sm:block">Price</span>
-                    <span className="text-[11px] sm:text-base font-bold text-slate-900 tracking-tight truncate">
-                      {(settings?.currency || 'LKR')} {item.price.toLocaleString()}
-                    </span>
-                  </div>
-
-                  {qty > 0 ? (
-                    <div className="flex items-center bg-slate-50 rounded-xl p-0.5 sm:p-1 border border-slate-200 shadow-sm shrink-0" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); updateCartById(item.id, item.name, item.price, -1); }}
-                        className="w-7 h-7 sm:w-11 sm:h-11 flex items-center justify-center bg-white rounded-lg text-slate-700 hover:bg-slate-100 shadow-sm border border-slate-100 transition-colors active:scale-90 shrink-0"
-                      >
-                        <Minus className="w-3 h-3 sm:w-5 sm:h-5" />
-                      </button>
-                      <span className="w-6 sm:w-10 text-center font-bold text-slate-900 text-xs sm:text-base">{qty}</span>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); updateCartById(item.id, item.name, item.price, 1); }}
-                        className="w-7 h-7 sm:w-11 sm:h-11 flex items-center justify-center bg-orange-500 text-white rounded-lg hover:bg-orange-600 shadow-sm transition-colors active:scale-90 shrink-0"
-                      >
-                        <Plus className="w-3 h-3 sm:w-5 sm:h-5" />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); updateCartById(item.id, item.name, item.price, 1); }}
-                      className="shrink-0 w-7 h-7 sm:w-auto sm:px-5 sm:py-3 rounded-lg sm:rounded-xl bg-orange-50 text-orange-600 hover:bg-orange-500 hover:text-white font-bold transition-all flex items-center justify-center shadow-sm sm:min-h-[44px]"
-                    >
-                      <Plus className="w-4 h-4 sm:hidden" />
-                      <span className="hidden sm:inline text-sm">+ Add to Order</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+      {/* Main Menu Grid with Single Card & Size Selector */}
+      <main className="flex-1 w-full max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 mt-4 py-4 sm:py-6 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-5 overflow-x-hidden">
+        {filteredMenu.map((item) => (
+          <MenuItemCard
+            key={item.id}
+            item={item}
+            currencySymbol={currencySymbol}
+            onAddToCart={handleAddCardToCart}
+          />
+        ))}
 
         {filteredMenu.length === 0 && (
           <div className="text-center py-20 bg-white rounded-3xl border border-slate-200 shadow-sm col-span-full">
@@ -804,7 +762,7 @@ function MenuContent() {
               </div>
               <span className="font-bold text-sm">View Cart</span>
             </div>
-            <span className="font-bold text-sm">{(settings?.currency || 'LKR')} {cartGrandTotal.toLocaleString()}</span>
+            <span className="font-bold text-sm">{currencySymbol} {cartGrandTotal.toLocaleString()}</span>
           </button>
         </div>
       )}
@@ -831,11 +789,11 @@ function MenuContent() {
 
           <div className="p-6 flex-1 overflow-y-auto space-y-4">
             {cart.map((item) => (
-              <div key={item.cartItemId} className="flex justify-between items-center bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+              <div key={item.name} className="flex justify-between items-center bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
                 <div className="flex-1 pr-4">
-                  <h4 className="font-bold text-slate-900 text-lg leading-tight">{item.name}</h4>
+                  <h4 className="font-bold text-slate-900 text-base leading-tight">{item.name}</h4>
                   <p className="text-orange-500 font-bold text-sm mt-1">
-                    {(settings?.currency || 'LKR')} {(item.price * item.quantity).toLocaleString()}
+                    {currencySymbol} {(item.price * item.quantity).toLocaleString()}
                   </p>
                   {item.notes && (
                     <p className="text-xs text-slate-500 mt-1 font-medium bg-slate-50 p-1.5 rounded-lg border border-slate-100 italic">
@@ -845,14 +803,14 @@ function MenuContent() {
                 </div>
                 <div className="flex items-center gap-3 bg-slate-50 rounded-xl p-1 border border-slate-200 shrink-0">
                   <button
-                    onClick={() => updateCartById(item.id, item.name, item.price, -1, item.notes)}
+                    onClick={() => updateCartById(item.name, -1)}
                     className="w-8 h-8 flex items-center justify-center bg-white rounded-lg text-slate-700 shadow-sm border border-slate-100 active:scale-90"
                   >
                     <Minus className="w-4 h-4" />
                   </button>
                   <span className="w-6 text-center font-bold text-slate-900">{item.quantity}</span>
                   <button
-                    onClick={() => updateCartById(item.id, item.name, item.price, 1, item.notes)}
+                    onClick={() => updateCartById(item.name, 1)}
                     className="w-8 h-8 flex items-center justify-center bg-orange-500 text-white rounded-lg shadow-sm active:scale-90"
                   >
                     <Plus className="w-4 h-4" />
@@ -877,7 +835,7 @@ function MenuContent() {
             <div className="flex justify-between items-center mb-6">
               <span className="text-slate-500 font-bold">Total Amount</span>
               <span className="text-3xl font-bold text-slate-900">
-                <span className="text-slate-400 text-xl mr-1">{(settings?.currency || 'LKR')}</span>
+                <span className="text-slate-400 text-xl mr-1">{currencySymbol}</span>
                 {cartGrandTotal.toLocaleString()}
               </span>
             </div>
@@ -938,86 +896,6 @@ function MenuContent() {
                   </button>
                 );
               })}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Item Detail Modal */}
-      {selectedMenuItem && (
-        <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center sm:p-4 bg-slate-900/60">
-          <div className="bg-white rounded-t-[2rem] sm:rounded-[2.5rem] w-full max-w-md overflow-hidden shadow-2xl relative animate-in slide-in-from-bottom sm:zoom-in-95 duration-300 flex flex-col max-h-[90vh]">
-
-            <button onClick={() => setSelectedMenuItem(null)} className="absolute top-4 right-4 z-10 w-10 h-10 bg-black/40 hover:bg-black/60 rounded-full flex items-center justify-center text-white transition-colors">
-              <X className="w-5 h-5" />
-            </button>
-
-            <div className="w-full h-48 sm:h-64 relative bg-slate-100 shrink-0">
-              <img
-                src={selectedMenuItem.image_url && selectedMenuItem.image_url.trim() !== "" ? selectedMenuItem.image_url : "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&q=70"}
-                alt={selectedMenuItem.name}
-                loading="lazy"
-                decoding="async"
-                className="w-full h-full object-cover"
-                onError={(e) => { e.currentTarget.src = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400&q=70"; }}
-              />
-              <div className="absolute top-4 left-4 flex flex-wrap gap-2 pr-12">
-                {selectedMenuItem.prep_time_minutes && (
-                  <span className="flex items-center gap-1.5 text-xs uppercase font-bold tracking-widest bg-slate-900/90 text-white px-3 py-1.5 rounded-xl shadow-sm border border-slate-700">
-                    ⏱️ {selectedMenuItem.prep_time_minutes}-{selectedMenuItem.prep_time_minutes + 5}m
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div className="p-6 overflow-y-auto no-scrollbar flex flex-col gap-6">
-              <div>
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {selectedMenuItem.tags && selectedMenuItem.tags.map(tag => {
-                    const style = tagConfig[tag] || { icon: null, color: "text-slate-600", bg: "bg-slate-100 border-slate-200" };
-                    const Icon = style.icon;
-                    return (
-                      <span key={tag} className={`flex items-center gap-1 text-[10px] uppercase font-bold tracking-widest ${style.bg} ${style.color} px-2.5 py-1 rounded-lg border`}>
-                        {Icon && <Icon className="w-3 h-3" />} {tag}
-                      </span>
-                    );
-                  })}
-                </div>
-                <h3 className="font-bold text-2xl text-slate-900 leading-tight mb-2">{selectedMenuItem.name}</h3>
-                <p className="text-sm text-slate-500 leading-relaxed font-medium">{selectedMenuItem.description}</p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-bold text-slate-700 mb-2">Special Cooking Notes</label>
-                <textarea
-                  value={itemNotes}
-                  onChange={(e) => setItemNotes(e.target.value)}
-                  placeholder="e.g., Less spicy, no onions..."
-                  className="w-full bg-slate-50 border border-slate-200 rounded-2xl p-4 text-sm focus:border-orange-500 focus:ring-4 focus:ring-orange-500/10 outline-none transition-all placeholder:text-slate-400 font-medium"
-                  rows={2}
-                />
-              </div>
-
-              <div className="flex items-center justify-between mt-2">
-                <span className="font-bold text-slate-700">Quantity</span>
-                <div className="flex items-center gap-4 bg-slate-50 rounded-2xl p-1.5 border border-slate-200">
-                  <button onClick={() => setItemQuantity(Math.max(1, itemQuantity - 1))} className="w-10 h-10 flex items-center justify-center bg-white rounded-xl text-slate-700 hover:bg-slate-100 shadow-sm border border-slate-100 transition-colors">
-                    <Minus className="w-5 h-5" />
-                  </button>
-                  <span className="w-8 text-center font-bold text-lg text-slate-900">{itemQuantity}</span>
-                  <button onClick={() => setItemQuantity(itemQuantity + 1)} className="w-10 h-10 flex items-center justify-center bg-orange-500 text-white rounded-xl hover:bg-orange-600 shadow-sm transition-colors">
-                    <Plus className="w-5 h-5" />
-                  </button>
-                </div>
-              </div>
-
-              <button
-                onClick={addToCartFromModal}
-                className="w-full bg-orange-500 hover:bg-orange-600 active:bg-orange-700 text-white py-4 rounded-2xl font-bold text-lg transition-colors shadow-lg shadow-orange-500/25 mt-2 flex justify-between items-center px-6"
-              >
-                <span>Add to Order</span>
-                <span>{(settings?.currency || 'LKR')} {(selectedMenuItem.price * itemQuantity).toLocaleString()}</span>
-              </button>
             </div>
           </div>
         </div>
