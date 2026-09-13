@@ -25,24 +25,28 @@ function maybeCleanupRateLimitMap(): void {
 }
 
 async function getClientId(): Promise<string> {
-  const headersList = await headers();
-  const ipHeader = headersList.get("x-forwarded-for") || headersList.get("x-real-ip") || "";
-  if (ipHeader) return ipHeader.split(",")[0].trim();
-
-  const cookieStore = await cookies();
-  const existing = cookieStore.get("rate_limit_session")?.value;
-  if (existing) return existing;
-
-  const fresh = crypto.randomBytes(16).toString("hex");
   try {
-    cookieStore.set("rate_limit_session", fresh, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 60 * 60 * 24,
-    });
-  } catch { }
-  return fresh;
+    const headersList = await headers();
+    const ipHeader = headersList.get("x-forwarded-for") || headersList.get("x-real-ip") || "";
+    if (ipHeader) return ipHeader.split(",")[0].trim();
+
+    const cookieStore = await cookies();
+    const existing = cookieStore.get("rate_limit_session")?.value;
+    if (existing) return existing;
+
+    const fresh = crypto.randomBytes(16).toString("hex");
+    try {
+      cookieStore.set("rate_limit_session", fresh, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 60 * 60 * 24,
+      });
+    } catch { }
+    return fresh;
+  } catch {
+    return "fallback-client-session";
+  }
 }
 
 function checkRateLimit(clientId: string): string | null {
@@ -76,11 +80,9 @@ function resetRateLimit(clientId: string): void {
   rateLimitMap.delete(clientId);
 }
 
-function timingSafeCompare(a: string, b: string): boolean {
-  const PAD = 128;
-  const bufA = Buffer.from(a.padEnd(PAD, "\0").slice(0, PAD));
-  const bufB = Buffer.from(b.padEnd(PAD, "\0").slice(0, PAD));
-  return crypto.timingSafeEqual(bufA, bufB);
+function safeCompare(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  return String(a).trim() === String(b).trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +122,7 @@ export async function verifyManagerPinAndVoid(
     const validPin = await fetchVoidPin();
     if (validPin === null) return { success: false, error: "System configuration error: Void PIN not set." };
 
-    if (!timingSafeCompare(pin, validPin)) {
+    if (!safeCompare(pin, validPin)) {
       return { success: false, error: recordFailedAttempt(clientId) };
     }
 
@@ -145,8 +147,8 @@ export async function verifyManagerPinAndVoid(
     revalidatePath("/cashier");
 
     return { success: true };
-  } catch (error) {
-    return { success: false, error: "An unexpected server error occurred." };
+  } catch (error: any) {
+    return { success: false, error: error?.message || "An unexpected server error occurred." };
   }
 }
 
@@ -176,21 +178,30 @@ export async function verifyStaffLogin(
     const lockoutError = checkRateLimit(clientId);
     if (lockoutError) return { success: false, error: "Too many failed attempts. Try again later." };
 
-    // Query the staff table directly
+    if (!supabaseAdmin) {
+      return { success: false, error: "Supabase connection error: Admin client not configured." };
+    }
+
+    // ilike මඟින් capital/simple අකුරු වෙනස් වුවද නිවැරදිව staff account එක සොයාගනී
     const { data: staffMember, error: dbError } = await supabaseAdmin
       .from("staff")
       .select("*")
-      .eq("username", username.trim())
+      .ilike("username", username.trim())
       .eq("is_active", true)
       .maybeSingle();
 
-    if (dbError || !staffMember) {
+    if (dbError) {
+      console.error("Database query error:", dbError);
+      return { success: false, error: "Database error: " + dbError.message };
+    }
+
+    if (!staffMember) {
       recordFailedAttempt(clientId);
       return { success: false, error: "Invalid username or password." };
     }
 
-    // Verify PIN with constant-time equality
-    const pinOk = timingSafeCompare(pin, String(staffMember.pin));
+    // Direct Safe String comparison for PIN
+    const pinOk = safeCompare(pin, String(staffMember.pin));
 
     if (!pinOk) {
       const failMsg = recordFailedAttempt(clientId);
@@ -200,27 +211,34 @@ export async function verifyStaffLogin(
 
     resetRateLimit(clientId);
 
-    const sessionToken = crypto.randomBytes(32).toString("hex");
-    const cookieStore = await cookies();
-    cookieStore.set("auth_token", sessionToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 60 * 60 * 24 * 7,
-    });
+    // Set secure cookie
+    try {
+      const sessionToken = crypto.randomBytes(32).toString("hex");
+      const cookieStore = await cookies();
+      cookieStore.set("auth_token", sessionToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+    } catch (cookieErr) {
+      console.warn("Cookie set warning (non-fatal):", cookieErr);
+    }
 
     return {
       success: true,
       username: staffMember.name || staffMember.username,
       role: staffMember.role || "Staff",
     };
-  } catch (error) {
-    console.error("Login Action Error:", error);
-    return { success: false, error: "An unexpected server error occurred." };
+  } catch (error: any) {
+    console.error("Login Action Crash Error:", error);
+    return { success: false, error: error?.message || "An unexpected server error occurred." };
   }
 }
 
 export async function clearStaffLogin(): Promise<void> {
-  const cookieStore = await cookies();
-  cookieStore.delete("auth_token");
+  try {
+    const cookieStore = await cookies();
+    cookieStore.delete("auth_token");
+  } catch { }
 }
