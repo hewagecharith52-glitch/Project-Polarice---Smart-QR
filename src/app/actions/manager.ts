@@ -2,105 +2,88 @@
 
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { revalidatePath } from "next/cache";
-import { headers, cookies } from "next/headers";
+import { cookies } from "next/headers";
 import crypto from "crypto";
 
-const MAX_ATTEMPTS = 5;
-const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
-const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+export type LoginResponse = {
+  success: boolean;
+  username?: string;
+  role?: string;
+  error?: string;
+};
 
-const rateLimitMap = new Map<string, { attempts: number; lockoutUntil: number }>();
-let lastCleanupAt = 0;
-
-function maybeCleanupRateLimitMap(): void {
-  const now = Date.now();
-  if (now - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
-  lastCleanupAt = now;
-  for (const [key, record] of rateLimitMap.entries()) {
-    if (record.lockoutUntil < now && record.attempts === 0) {
-      rateLimitMap.delete(key);
-    }
-  }
-}
-
-async function getClientId(): Promise<string> {
+export async function verifyStaffLogin(
+  username: string,
+  pin: string
+): Promise<LoginResponse> {
   try {
-    const headersList = await headers();
-    const ipHeader = headersList.get("x-forwarded-for") || headersList.get("x-real-ip") || "";
-    if (ipHeader) return ipHeader.split(",")[0].trim();
+    const cleanUsername = String(username || "").trim();
+    const cleanPin = String(pin || "").trim();
 
-    const cookieStore = await cookies();
-    const existing = cookieStore.get("rate_limit_session")?.value;
-    if (existing) return existing;
+    if (!cleanUsername) {
+      return { success: false, error: "Username is required." };
+    }
+    if (!cleanPin) {
+      return { success: false, error: "Password is required." };
+    }
 
-    const fresh = crypto.randomBytes(16).toString("hex");
+    if (!supabaseAdmin) {
+      return { success: false, error: "Database configuration missing on server." };
+    }
+
+    // Direct database query without complex external calls
+    const { data: staffMember, error: dbError } = await supabaseAdmin
+      .from("staff")
+      .select("username, pin, name, role, is_active")
+      .ilike("username", cleanUsername)
+      .eq("is_active", true)
+      .maybeSingle();
+
+    if (dbError) {
+      console.error("Supabase Database Error:", dbError);
+      return { success: false, error: "Database connection failed. Please try again." };
+    }
+
+    if (!staffMember) {
+      return { success: false, error: "Invalid username or password." };
+    }
+
+    // Direct string match for PIN
+    const isPinCorrect = String(staffMember.pin || "").trim() === cleanPin;
+
+    if (!isPinCorrect) {
+      return { success: false, error: "Invalid username or password." };
+    }
+
+    // Safe cookie assignment for session
     try {
-      cookieStore.set("rate_limit_session", fresh, {
+      const sessionToken = crypto.randomBytes(24).toString("hex");
+      const cookieStore = await cookies();
+      cookieStore.set({
+        name: "auth_token",
+        value: sessionToken,
         httpOnly: true,
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",
-        maxAge: 60 * 60 * 24,
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
       });
-    } catch { }
-    return fresh;
-  } catch {
-    return "fallback-client-session";
+    } catch (cookieErr) {
+      console.warn("Cookie set warning:", cookieErr);
+    }
+
+    return {
+      success: true,
+      username: String(staffMember.name || staffMember.username),
+      role: String(staffMember.role || "Staff"),
+    };
+  } catch (err: any) {
+    console.error("verifyStaffLogin Catch Block:", err);
+    return {
+      success: false,
+      error: "Authentication service error. Please contact administrator.",
+    };
   }
-}
-
-function checkRateLimit(clientId: string): string | null {
-  maybeCleanupRateLimitMap();
-  const record = rateLimitMap.get(clientId);
-  if (!record) return null;
-  if (Date.now() < record.lockoutUntil) {
-    const minutesLeft = Math.ceil((record.lockoutUntil - Date.now()) / 60_000);
-    return `Too many attempts. Please try again in ${minutesLeft} minute${minutesLeft === 1 ? "" : "s"}.`;
-  }
-  return null;
-}
-
-function recordFailedAttempt(clientId: string): string {
-  const record = rateLimitMap.get(clientId) ?? { attempts: 0, lockoutUntil: 0 };
-  record.attempts += 1;
-
-  if (record.attempts >= MAX_ATTEMPTS) {
-    record.lockoutUntil = Date.now() + LOCKOUT_DURATION_MS;
-    record.attempts = 0;
-    rateLimitMap.set(clientId, record);
-    return "Account locked for 15 minutes due to too many failed attempts.";
-  }
-
-  rateLimitMap.set(clientId, record);
-  const attemptsLeft = MAX_ATTEMPTS - record.attempts;
-  return `Invalid PIN. ${attemptsLeft} attempt${attemptsLeft === 1 ? "" : "s"} remaining.`;
-}
-
-function resetRateLimit(clientId: string): void {
-  rateLimitMap.delete(clientId);
-}
-
-function safeCompare(a: string, b: string): boolean {
-  if (!a || !b) return false;
-  return String(a).trim() === String(b).trim();
-}
-
-function sanitizeText(str: string): string {
-  return str.replace(/[<>]/g, "").trim();
-}
-
-// ---------------------------------------------------------------------------
-// 1. VOID ACTION: Uses void_pin from restaurant_settings
-// ---------------------------------------------------------------------------
-async function fetchVoidPin(): Promise<string | null> {
-  const { data, error } = await supabaseAdmin
-    .from("restaurant_settings")
-    .select("void_pin")
-    .order("id", { ascending: true })
-    .limit(1)
-    .maybeSingle();
-
-  if (error || !data || !data.void_pin) return null;
-  return String(data.void_pin);
 }
 
 export type VoidResponse = {
@@ -114,123 +97,51 @@ export async function verifyManagerPinAndVoid(
   rawReason: string
 ): Promise<VoidResponse> {
   try {
-    if (!targetId || typeof targetId !== "string") return { success: false, error: "Invalid target ID." };
-    if (!pin || typeof pin !== "string") return { success: false, error: "PIN is required." };
-    if (!rawReason || typeof rawReason !== "string") return { success: false, error: "Void reason is required." };
-
-    const clientId = await getClientId();
-    const lockoutError = checkRateLimit(clientId);
-    if (lockoutError) return { success: false, error: lockoutError };
-
-    const validPin = await fetchVoidPin();
-    if (validPin === null) return { success: false, error: "System configuration error: Void PIN not set." };
-
-    if (!safeCompare(pin, validPin)) {
-      return { success: false, error: recordFailedAttempt(clientId) };
+    if (!targetId || !pin || !rawReason) {
+      return { success: false, error: "Missing required fields." };
     }
 
-    resetRateLimit(clientId);
+    const cleanPin = String(pin).trim();
+    const cleanReason = String(rawReason).replace(/[<>]/g, "").trim();
 
-    const sanitizedReason = sanitizeText(rawReason);
-    if (!sanitizedReason) return { success: false, error: "A valid void reason is required." };
+    if (!supabaseAdmin) {
+      return { success: false, error: "Database configuration missing on server." };
+    }
+
+    const { data: setting, error: settingErr } = await supabaseAdmin
+      .from("restaurant_settings")
+      .select("void_pin")
+      .limit(1)
+      .maybeSingle();
+
+    if (settingErr || !setting || !setting.void_pin) {
+      return { success: false, error: "Void PIN configuration not found." };
+    }
+
+    if (String(setting.void_pin).trim() !== cleanPin) {
+      return { success: false, error: "Invalid manager PIN." };
+    }
 
     const { error: dbError } = await supabaseAdmin
       .from("petty_cash_logs")
       .update({
         is_voided: true,
-        void_reason: sanitizedReason,
+        void_reason: cleanReason,
         voided_by: "Manager",
         voided_at: new Date().toISOString(),
       })
       .eq("id", targetId);
 
-    if (dbError) return { success: false, error: "Failed to update database." };
+    if (dbError) {
+      return { success: false, error: "Failed to void entry in database." };
+    }
 
     revalidatePath("/analytics");
     revalidatePath("/cashier");
 
     return { success: true };
-  } catch (error: any) {
-    return { success: false, error: error?.message || "An unexpected server error occurred." };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 2. STAFF LOGIN: Uses username and pin from staff table
-// ---------------------------------------------------------------------------
-export type LoginResponse = {
-  success: boolean;
-  username?: string;
-  role?: string;
-  error?: string;
-};
-
-export async function verifyStaffLogin(
-  username: string,
-  pin: string
-): Promise<LoginResponse> {
-  try {
-    if (!username || typeof username !== "string") {
-      return { success: false, error: "Username is required." };
-    }
-    if (!pin || typeof pin !== "string") {
-      return { success: false, error: "Password is required." };
-    }
-
-    const clientId = await getClientId();
-    const lockoutError = checkRateLimit(clientId);
-    if (lockoutError) return { success: false, error: "Too many failed attempts. Try again later." };
-
-    if (!supabaseAdmin) {
-      return { success: false, error: "Supabase client not configured." };
-    }
-
-    const { data: staffMember, error: dbError } = await supabaseAdmin
-      .from("staff")
-      .select("*")
-      .ilike("username", username.trim())
-      .eq("is_active", true)
-      .maybeSingle();
-
-    if (dbError) {
-      console.error("Database error:", dbError);
-      return { success: false, error: "Database connection failed." };
-    }
-
-    if (!staffMember) {
-      recordFailedAttempt(clientId);
-      return { success: false, error: "Invalid username or password." };
-    }
-
-    const pinOk = safeCompare(pin, String(staffMember.pin));
-
-    if (!pinOk) {
-      const failMsg = recordFailedAttempt(clientId);
-      const userMsg = failMsg.startsWith("Invalid PIN") ? "Invalid username or password." : failMsg;
-      return { success: false, error: userMsg };
-    }
-
-    resetRateLimit(clientId);
-
-    try {
-      const sessionToken = crypto.randomBytes(32).toString("hex");
-      const cookieStore = await cookies();
-      cookieStore.set("auth_token", sessionToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === "production",
-        sameSite: "lax",
-        maxAge: 60 * 60 * 24 * 7,
-      });
-    } catch { }
-
-    return {
-      success: true,
-      username: staffMember.name || staffMember.username,
-      role: staffMember.role || "Staff",
-    };
-  } catch (error: any) {
-    console.error("Login Server Error:", error);
-    return { success: false, error: error?.message || "An unexpected server error occurred." };
+  } catch (err: any) {
+    return { success: false, error: "Failed to process void operation." };
   }
 }
 
