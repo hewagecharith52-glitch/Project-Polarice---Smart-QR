@@ -1,7 +1,6 @@
 "use server";
 
 import { supabaseAdmin } from "@/lib/supabase-admin";
-import DOMPurify from "isomorphic-dompurify";
 import { revalidatePath } from "next/cache";
 import { headers, cookies } from "next/headers";
 import crypto from "crypto";
@@ -85,6 +84,10 @@ function safeCompare(a: string, b: string): boolean {
   return String(a).trim() === String(b).trim();
 }
 
+function sanitizeText(str: string): string {
+  return str.replace(/[<>]/g, "").trim();
+}
+
 // ---------------------------------------------------------------------------
 // 1. VOID ACTION: Uses void_pin from restaurant_settings
 // ---------------------------------------------------------------------------
@@ -128,8 +131,8 @@ export async function verifyManagerPinAndVoid(
 
     resetRateLimit(clientId);
 
-    const sanitizedReason = DOMPurify.sanitize(rawReason);
-    if (!sanitizedReason.trim()) return { success: false, error: "A valid void reason is required." };
+    const sanitizedReason = sanitizeText(rawReason);
+    if (!sanitizedReason) return { success: false, error: "A valid void reason is required." };
 
     const { error: dbError } = await supabaseAdmin
       .from("petty_cash_logs")
@@ -179,10 +182,9 @@ export async function verifyStaffLogin(
     if (lockoutError) return { success: false, error: "Too many failed attempts. Try again later." };
 
     if (!supabaseAdmin) {
-      return { success: false, error: "Supabase connection error: Admin client not configured." };
+      return { success: false, error: "Supabase client not configured." };
     }
 
-    // ilike මඟින් capital/simple අකුරු වෙනස් වුවද නිවැරදිව staff account එක සොයාගනී
     const { data: staffMember, error: dbError } = await supabaseAdmin
       .from("staff")
       .select("*")
@@ -191,8 +193,8 @@ export async function verifyStaffLogin(
       .maybeSingle();
 
     if (dbError) {
-      console.error("Database query error:", dbError);
-      return { success: false, error: "Database error: " + dbError.message };
+      console.error("Database error:", dbError);
+      return { success: false, error: "Database connection failed." };
     }
 
     if (!staffMember) {
@@ -200,7 +202,6 @@ export async function verifyStaffLogin(
       return { success: false, error: "Invalid username or password." };
     }
 
-    // Direct Safe String comparison for PIN
     const pinOk = safeCompare(pin, String(staffMember.pin));
 
     if (!pinOk) {
@@ -211,7 +212,6 @@ export async function verifyStaffLogin(
 
     resetRateLimit(clientId);
 
-    // Set secure cookie
     try {
       const sessionToken = crypto.randomBytes(32).toString("hex");
       const cookieStore = await cookies();
@@ -221,9 +221,7 @@ export async function verifyStaffLogin(
         sameSite: "lax",
         maxAge: 60 * 60 * 24 * 7,
       });
-    } catch (cookieErr) {
-      console.warn("Cookie set warning (non-fatal):", cookieErr);
-    }
+    } catch { }
 
     return {
       success: true,
@@ -231,7 +229,7 @@ export async function verifyStaffLogin(
       role: staffMember.role || "Staff",
     };
   } catch (error: any) {
-    console.error("Login Action Crash Error:", error);
+    console.error("Login Server Error:", error);
     return { success: false, error: error?.message || "An unexpected server error occurred." };
   }
 }
