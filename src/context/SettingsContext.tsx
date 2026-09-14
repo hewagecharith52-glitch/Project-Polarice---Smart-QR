@@ -25,25 +25,17 @@ export interface RestaurantSettings {
 
 const defaultSettings: RestaurantSettings = {
   id: 1,
-  name: "The Grand Aroma",
+  name: "Gravity House",
   tagline: "Smart POS",
-  currency: "LKR",
-  service_charge_pct: 10,
+  currency: "Rs",
+  service_charge_pct: 12,
   tax_pct: 0,
-  table_count: 8,
-  phone: "+94 77 123 4567",
-  address: "123 Main Street, Colombo",
-  tables: [
-    { id: "1", name: "Table 01", capacity: 4, section: "Main Hall" },
-    { id: "2", name: "Table 02", capacity: 4, section: "Main Hall" },
-    { id: "3", name: "Table 03", capacity: 2, section: "Main Hall" },
-    { id: "4", name: "Table 04", capacity: 6, section: "Main Hall" },
-    { id: "5", name: "Table 05", capacity: 4, section: "Main Hall" },
-    { id: "6", name: "VIP-1", capacity: 8, section: "VIP Lounge" },
-    { id: "7", name: "Terrace-1", capacity: 4, section: "Terrace" },
-    { id: "8", name: "Terrace-2", capacity: 2, section: "Terrace" }
-  ]
+  table_count: 12,
+  phone: "0714850600",
+  address: "123 Main Street, Colombo 7",
 };
+
+const SETTINGS_CACHE_KEY = "pos_cached_restaurant_settings";
 
 interface SettingsContextType {
   settings: RestaurantSettings;
@@ -60,8 +52,19 @@ const SettingsContext = createContext<SettingsContextType>({
 });
 
 export const SettingsProvider = ({ children }: { children: React.ReactNode }) => {
-  const [settings, setSettings] = useState<RestaurantSettings>(defaultSettings);
-  const [loading, setLoading] = useState<boolean>(true);
+  // Load cached settings immediately to eliminate 0-second delay / flickering
+  const [settings, setSettings] = useState<RestaurantSettings>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = localStorage.getItem(SETTINGS_CACHE_KEY);
+        if (cached) return JSON.parse(cached);
+      } catch (e) {
+        console.warn("Failed to read settings from cache:", e);
+      }
+    }
+    return defaultSettings;
+  });
+  const [loading, setLoading] = useState<boolean>(false);
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -73,10 +76,7 @@ export const SettingsProvider = ({ children }: { children: React.ReactNode }) =>
         .maybeSingle();
 
       if (data && !error) {
-        const hasValidTables = Array.isArray(data.tables) && data.tables.length > 0;
-        const resolvedTables = hasValidTables ? data.tables : defaultSettings.tables;
-
-        setSettings({
+        const updated: RestaurantSettings = {
           ...defaultSettings,
           ...data,
           id: Number(data.id) || 1,
@@ -85,12 +85,16 @@ export const SettingsProvider = ({ children }: { children: React.ReactNode }) =>
           currency: data.currency || defaultSettings.currency,
           service_charge_pct: Number.isFinite(Number(data.service_charge_pct)) ? Number(data.service_charge_pct) : 0,
           tax_pct: Number.isFinite(Number(data.tax_pct)) ? Number(data.tax_pct) : 0,
-          table_count: resolvedTables?.length || Number(data.table_count) || 8,
-          tables: resolvedTables
-        });
+          table_count: Number(data.table_count) || defaultSettings.table_count,
+        };
+
+        setSettings(updated);
+        if (typeof window !== "undefined") {
+          localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(updated));
+        }
       }
     } catch (err) {
-      console.warn("Could not fetch settings from Supabase, using defaults:", err);
+      console.warn("Could not fetch settings from Supabase, using cache/defaults:", err);
     } finally {
       setLoading(false);
     }
@@ -131,6 +135,9 @@ export const SettingsProvider = ({ children }: { children: React.ReactNode }) =>
       };
 
       setSettings(payload);
+      if (typeof window !== "undefined") {
+        localStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(payload));
+      }
 
       const { error } = await supabase
         .from("restaurant_settings")

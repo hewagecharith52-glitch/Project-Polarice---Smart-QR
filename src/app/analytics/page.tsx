@@ -4,7 +4,7 @@ import React, { useEffect, useState, useMemo, useRef, useCallback } from "react"
 import { supabase } from "@/lib/supabase";
 import { useSettings } from "@/context/SettingsContext";
 
-import { TrendingUp, CreditCard, CheckCircle, Receipt, ArrowUpRight, Clock, Coffee, PieChart, BarChart3, ShoppingBag, X, Search, Eye, Printer, Flame, Utensils, Moon } from "lucide-react";
+import { TrendingUp, CreditCard, CheckCircle, Receipt, ArrowUpRight, Clock, Coffee, PieChart, ShoppingBag, X, Search, Eye, Printer, Flame, Utensils, Moon } from "lucide-react";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { Navbar } from "@/components/Navbar";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
@@ -58,6 +58,28 @@ type Order = {
   customer_name?: string;
   payment_method?: string;
 };
+
+// Local Timezone Safe Date Matcher (YYYY-MM-DD)
+function isSameLocalDate(dateA: Date, dateB: Date): boolean {
+  return (
+    dateA.getFullYear() === dateB.getFullYear() &&
+    dateA.getMonth() === dateB.getMonth() &&
+    dateA.getDate() === dateB.getDate()
+  );
+}
+
+function parseLocalISODate(dateStr: string): Date {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function getTodayLocalDateString(): string {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
 
 const AnimatedGauge = ({ percentage, label, icon, revenue, colorClass, bgClass, shadowColor, currency }: { percentage: number, label: string, icon: string, revenue: number, colorClass: string, bgClass: string, shadowColor: string, currency: string }) => {
   const [fill, setFill] = useState(0);
@@ -117,7 +139,7 @@ export default function AnalyticsPage() {
   const { settings } = useSettings();
   const [allOrders, setAllOrders] = useState<Order[]>([]);
   const [timeFilter, setTimeFilter] = useState<"Today" | "Week" | "Month" | "Year" | "Custom">("Today");
-  const [customDate, setCustomDate] = useState<string>(new Date().toISOString().split("T")[0]);
+  const [customDate, setCustomDate] = useState<string>(getTodayLocalDateString());
   const [isLoading, setIsLoading] = useState(true);
 
   // Bill Viewer & Transactions State
@@ -169,7 +191,6 @@ export default function AnalyticsPage() {
     setIsMounted(true);
   }, []);
 
-  // Lock background scroll when any modal is open
   const isAnyModalOpen = Boolean(viewingOrder || voidModalOpen || returnModalOpen || showShiftSuccess);
   useEffect(() => {
     if (isAnyModalOpen) {
@@ -187,46 +208,6 @@ export default function AnalyticsPage() {
     setTimeout(() => setToastMessage({ text: "", type: "success" }), 3000);
   };
 
-  const handleSubmitShift = async () => {
-    if (isSubmittingShift) return;
-
-    if (actualCashCounted <= 0) {
-      showToast("⚠️ Please enter denomination counts before closing the shift.", "error");
-      return;
-    }
-    if (totalRevenue <= 0 && actualCashCounted <= 0) {
-      showToast("⚠️ No revenue or cash data found. Cannot close an empty shift.", "error");
-      return;
-    }
-
-    setIsSubmittingShift(true);
-    try {
-      const payload = {
-        opening_float: openingFloat,
-        cash_revenue: cashRevenue,
-        petty_cash_total: autoPettyCashTotal,
-        expected_cash: expectedCashInDrawer,
-        actual_cash_counted: actualCashCounted,
-        cash_variance: cashVariance,
-        card_revenue: cardRevenue,
-        total_revenue: totalRevenue,
-        denominations: denom,
-        shift_date: new Date().toISOString(),
-      };
-      const { error } = await supabase.from("drawer_reconciliations").insert([payload]);
-      if (error) throw error;
-
-      setShowShiftSuccess(true);
-      setTimeout(() => setShowShiftSuccess(false), 2500);
-
-      fetchReconciliations();
-    } catch (err: any) {
-      showToast(`❌ Failed to save: ${err.message || "Unknown error"}`, "error");
-    } finally {
-      setIsSubmittingShift(false);
-    }
-  };
-
   const channelRefs = useRef<ReturnType<typeof supabase.channel>[]>([]);
 
   const fetchAnalytics = useCallback(async () => {
@@ -237,7 +218,7 @@ export default function AnalyticsPage() {
       .select("*")
       .in("status", ["completed", "Completed"])
       .order("created_at", { ascending: false })
-      .limit(1000);
+      .limit(1500);
 
     if (data) {
       setAllOrders(data as Order[]);
@@ -317,15 +298,16 @@ export default function AnalyticsPage() {
     }
   }, [printOrder]);
 
+  // Primary Global Time-Filter for Orders
   const orders = useMemo(() => {
     const now = new Date();
     return allOrders.filter(order => {
       const orderDate = new Date(order.created_at);
       if (timeFilter === "Today") {
-        return orderDate.toDateString() === now.toDateString();
+        return isSameLocalDate(orderDate, now);
       }
       if (timeFilter === "Week") {
-        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
         return orderDate >= weekAgo;
       }
       if (timeFilter === "Month") {
@@ -335,19 +317,21 @@ export default function AnalyticsPage() {
         return orderDate.getFullYear() === now.getFullYear();
       }
       if (timeFilter === "Custom" && customDate) {
-        return orderDate.toDateString() === new Date(customDate).toDateString();
+        const targetDate = parseLocalISODate(customDate);
+        return isSameLocalDate(orderDate, targetDate);
       }
       return true;
     });
   }, [allOrders, timeFilter, customDate]);
 
+  // Reconciliations Filtered by the Selected Time Period
   const filteredReconciliations = useMemo(() => {
     const now = new Date();
     return pastReconciliations.filter((rec) => {
       const recDate = new Date(rec.shift_date);
-      if (timeFilter === "Today") return recDate.toDateString() === now.toDateString();
+      if (timeFilter === "Today") return isSameLocalDate(recDate, now);
       if (timeFilter === "Week") {
-        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
         return recDate >= weekAgo;
       }
       if (timeFilter === "Month") {
@@ -355,32 +339,158 @@ export default function AnalyticsPage() {
       }
       if (timeFilter === "Year") return recDate.getFullYear() === now.getFullYear();
       if (timeFilter === "Custom" && customDate) {
-        return recDate.toDateString() === new Date(customDate).toDateString();
+        const targetDate = parseLocalISODate(customDate);
+        return isSameLocalDate(recDate, targetDate);
       }
       return true;
     });
   }, [pastReconciliations, timeFilter, customDate]);
 
+  // Petty Cash Logs Filtered by Selected Time Period
+  const allFilteredPettyCash = useMemo(() => {
+    const now = new Date();
+    return pettyCashLogs.filter(log => {
+      const logDate = new Date(log.created_at);
+      if (timeFilter === "Today") return isSameLocalDate(logDate, now);
+      if (timeFilter === "Week") {
+        const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
+        return logDate >= weekAgo;
+      }
+      if (timeFilter === "Month") return logDate.getMonth() === now.getMonth() && logDate.getFullYear() === now.getFullYear();
+      if (timeFilter === "Year") return logDate.getFullYear() === now.getFullYear();
+      if (timeFilter === "Custom" && customDate) {
+        const targetDate = parseLocalISODate(customDate);
+        return isSameLocalDate(logDate, targetDate);
+      }
+      return true;
+    });
+  }, [pettyCashLogs, timeFilter, customDate]);
+
+  const activePettyCash = allFilteredPettyCash.filter(log => !log.is_voided);
+  const voidedPettyCash = allFilteredPettyCash.filter(log => log.is_voided);
+
+  // Revenue & Payment Method Calculations for Selected Time Period
+  const { periodCashRevenue, periodCardRevenue, calculatedDiscounts } = useMemo(() => {
+    let cRev = 0;
+    let cdRev = 0;
+    let disc = 0;
+
+    orders.forEach(o => {
+      if (o.payment_method === 'Cash') {
+        cRev += Number(o.total_amount || 0);
+      } else if (o.payment_method === 'Card') {
+        cdRev += Number(o.total_amount || 0);
+      } else if (o.payment_method?.startsWith('Split')) {
+        const match = o.payment_method.match(/Cash:\s*([\d.]+),\s*Card:\s*([\d.]+)/);
+        if (match) {
+          cRev += Number(match[1]);
+          cdRev += Number(match[2]);
+        } else {
+          cRev += Number(o.total_amount || 0);
+        }
+      } else {
+        cRev += Number(o.total_amount || 0);
+      }
+
+      const subtotal = o.items?.reduce((s, item) => s + (item.price * item.quantity), 0) || 0;
+      const serviceCharge = (o.order_type === 'takeaway' || o.order_type === 'delivery') ? 0 : subtotal * (settings.service_charge_pct / 100);
+      const expectedTotal = subtotal + serviceCharge;
+      const diff = expectedTotal - Number(o.total_amount || 0);
+      if (diff > 1) disc += diff;
+    });
+
+    return { periodCashRevenue: cRev, periodCardRevenue: cdRev, calculatedDiscounts: disc };
+  }, [orders, settings.service_charge_pct]);
+
+  // Petty Cash Expenses inside selected period
+  const autoPettyCashTotal = useMemo(() => {
+    return activePettyCash.reduce(
+      (sum, log) => sum + (Number(log.amount || 0) - Number(log.returned_change || 0)),
+      0
+    );
+  }, [activePettyCash]);
+
+  // Financial summary mapped to the chosen filter
+  const cashRevenue = periodCashRevenue;
+  const cardRevenue = periodCardRevenue;
+  const discountsGiven = calculatedDiscounts;
+  const totalRevenue = orders.reduce((sum, order) => sum + Number(order.total_amount || 0), 0);
+  const settledCount = orders.length;
+  const aov = settledCount > 0 ? totalRevenue / settledCount : 0;
+
+  const expectedCashInDrawer = openingFloat + cashRevenue - autoPettyCashTotal;
+  const actualCashCounted =
+    (denom.d5000 * 5000) +
+    (denom.d1000 * 1000) +
+    (denom.d500 * 500) +
+    (denom.d100 * 100) +
+    (denom.d50 * 50) +
+    (denom.d20 * 20) +
+    denom.coins;
+  const cashVariance = actualCashCounted - expectedCashInDrawer;
+
+  const handleSubmitShift = async () => {
+    if (isSubmittingShift) return;
+
+    if (actualCashCounted <= 0) {
+      showToast("⚠️ Please enter denomination counts before closing the shift.", "error");
+      return;
+    }
+    if (totalRevenue <= 0 && actualCashCounted <= 0) {
+      showToast("⚠️ No revenue or cash data found. Cannot close an empty shift.", "error");
+      return;
+    }
+
+    setIsSubmittingShift(true);
+    try {
+      const payload = {
+        opening_float: openingFloat,
+        cash_revenue: cashRevenue,
+        petty_cash_total: autoPettyCashTotal,
+        expected_cash: expectedCashInDrawer,
+        actual_cash_counted: actualCashCounted,
+        cash_variance: cashVariance,
+        card_revenue: cardRevenue,
+        total_revenue: totalRevenue,
+        denominations: denom,
+        shift_date: new Date().toISOString(),
+      };
+      const { error } = await supabase.from("drawer_reconciliations").insert([payload]);
+      if (error) throw error;
+
+      setShowShiftSuccess(true);
+      setTimeout(() => setShowShiftSuccess(false), 2500);
+
+      fetchReconciliations();
+    } catch (err: any) {
+      showToast(`❌ Failed to save: ${err.message || "Unknown error"}`, "error");
+    } finally {
+      setIsSubmittingShift(false);
+    }
+  };
+
+  // Synchronized Transactions: respects both the main filter and sub-filters
   const transactionOrders = useMemo(() => {
     let filtered = allOrders;
     const now = new Date();
 
     filtered = filtered.filter(order => {
       const orderDate = new Date(order.created_at);
+
       if (transactionDateFilter === "Today") {
-        return orderDate.toDateString() === now.toDateString();
+        return isSameLocalDate(orderDate, now);
       }
       if (transactionDateFilter === "Yesterday") {
-        const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-        return orderDate.toDateString() === yesterday.toDateString();
+        const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+        return isSameLocalDate(orderDate, yesterday);
       }
       if (transactionDateFilter === "Last 7 Days") {
-        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const weekAgo = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
         return orderDate >= weekAgo;
       }
       if (transactionDateFilter === "Custom Date" && customDateRange.start && customDateRange.end) {
-        const start = new Date(customDateRange.start);
-        const end = new Date(customDateRange.end);
+        const start = parseLocalISODate(customDateRange.start);
+        const end = parseLocalISODate(customDateRange.end);
         end.setHours(23, 59, 59, 999);
         return orderDate >= start && orderDate <= end;
       }
@@ -401,10 +511,6 @@ export default function AnalyticsPage() {
     return filtered;
   }, [allOrders, transactionDateFilter, customDateRange, transactionSearch]);
 
-  const totalRevenue = orders.reduce((sum, order) => sum + Number(order.total_amount || 0), 0);
-  const settledCount = orders.length;
-  const aov = settledCount > 0 ? totalRevenue / settledCount : 0;
-
   const dineInOrders = orders.filter(o => !o.order_type || o.order_type === 'dine-in');
   const takeawayOrders = orders.filter(o => o.order_type === 'takeaway');
   const deliveryOrders = orders.filter(o => o.order_type === 'delivery');
@@ -412,111 +518,6 @@ export default function AnalyticsPage() {
   const dineInRevenue = dineInOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
   const takeawayRevenue = takeawayOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
   const deliveryRevenue = deliveryOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
-
-  const allFilteredPettyCash = useMemo(() => {
-    const now = new Date();
-    return pettyCashLogs.filter(log => {
-      const logDate = new Date(log.created_at);
-      if (timeFilter === "Today") return logDate.toDateString() === now.toDateString();
-      if (timeFilter === "Week") return logDate >= new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      if (timeFilter === "Month") return logDate.getMonth() === now.getMonth() && logDate.getFullYear() === now.getFullYear();
-      if (timeFilter === "Year") return logDate.getFullYear() === now.getFullYear();
-      if (timeFilter === "Custom" && customDate) return logDate.toDateString() === new Date(customDate).toDateString();
-      return true;
-    });
-  }, [pettyCashLogs, timeFilter, customDate]);
-
-  const activePettyCash = allFilteredPettyCash.filter(log => !log.is_voided);
-  const voidedPettyCash = allFilteredPettyCash.filter(log => log.is_voided);
-
-  const shiftWindowStart = useMemo(() => {
-    const latestClose = pastReconciliations[0]?.shift_date;
-    if (latestClose) return new Date(latestClose);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    return today;
-  }, [pastReconciliations]);
-
-  const shiftOrders = useMemo(() => {
-    return allOrders.filter(
-      (o) =>
-        ["completed", "Completed"].includes(o.status) &&
-        new Date(o.created_at) > shiftWindowStart
-    );
-  }, [allOrders, shiftWindowStart]);
-
-  let cashRevenue = 0;
-  let cardRevenue = 0;
-  let discountsGiven = 0;
-
-  shiftOrders.forEach(o => {
-    if (o.payment_method === 'Cash') {
-      cashRevenue += Number(o.total_amount || 0);
-    } else if (o.payment_method === 'Card') {
-      cardRevenue += Number(o.total_amount || 0);
-    } else if (o.payment_method?.startsWith('Split')) {
-      const match = o.payment_method.match(/Cash:\s*([\d.]+),\s*Card:\s*([\d.]+)/);
-      if (match) {
-        cashRevenue += Number(match[1]);
-        cardRevenue += Number(match[2]);
-      } else {
-        cashRevenue += Number(o.total_amount || 0);
-      }
-    } else {
-      cashRevenue += Number(o.total_amount || 0);
-    }
-
-    const subtotal = o.items?.reduce((s, item) => s + (item.price * item.quantity), 0) || 0;
-    const serviceCharge = (o.order_type === 'takeaway' || o.order_type === 'delivery') ? 0 : subtotal * (settings.service_charge_pct / 100);
-    const expectedTotal = subtotal + serviceCharge;
-    const diff = expectedTotal - Number(o.total_amount || 0);
-    if (diff > 1) discountsGiven += diff;
-  });
-
-  const shiftPettyCash = useMemo(() => {
-    return activePettyCash.filter(
-      (log) => new Date(log.created_at) > shiftWindowStart
-    );
-  }, [activePettyCash, shiftWindowStart]);
-
-  const autoPettyCashTotal = shiftPettyCash.reduce(
-    (sum, log) => sum + (log.amount - (log.returned_change || 0)),
-    0
-  );
-
-  const expectedCashInDrawer = openingFloat + cashRevenue - autoPettyCashTotal;
-  const actualCashCounted =
-    (denom.d5000 * 5000) +
-    (denom.d1000 * 1000) +
-    (denom.d500 * 500) +
-    (denom.d100 * 100) +
-    (denom.d50 * 50) +
-    (denom.d20 * 20) +
-    denom.coins;
-  const cashVariance = actualCashCounted - expectedCashInDrawer;
-
-  const { periodCashRevenue, periodCardRevenue } = useMemo(() => {
-    let cRev = 0;
-    let cdRev = 0;
-    orders.forEach(o => {
-      if (o.payment_method === 'Cash') {
-        cRev += Number(o.total_amount || 0);
-      } else if (o.payment_method === 'Card') {
-        cdRev += Number(o.total_amount || 0);
-      } else if (o.payment_method?.startsWith('Split')) {
-        const match = o.payment_method.match(/Cash:\s*([\d.]+),\s*Card:\s*([\d.]+)/);
-        if (match) {
-          cRev += Number(match[1]);
-          cdRev += Number(match[2]);
-        } else {
-          cRev += Number(o.total_amount || 0);
-        }
-      } else {
-        cRev += Number(o.total_amount || 0);
-      }
-    });
-    return { periodCashRevenue: cRev, periodCardRevenue: cdRev };
-  }, [orders]);
 
   const cashPercent = totalRevenue > 0 ? Math.round((periodCashRevenue / totalRevenue) * 100) : 0;
   const cardPercent = totalRevenue > 0 ? Math.round((periodCardRevenue / totalRevenue) * 100) : 0;
@@ -588,7 +589,6 @@ export default function AnalyticsPage() {
       <div className="flex-1 flex flex-col font-sans bg-slate-50 text-slate-900 pt-[72px] no-print">
         <Navbar />
 
-        {/* Global Toast Message with highest Z-index */}
         {toastMessage.text && (
           <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[110] animate-in fade-in slide-in-from-top-4 flex items-center gap-2 px-6 py-3 rounded-full shadow-2xl font-bold text-sm bg-slate-900 text-white pointer-events-none">
             {toastMessage.type === "success" ? <CheckCircle className="w-4 h-4 text-emerald-400" /> : <X className="w-4 h-4 text-rose-400" />}
@@ -596,7 +596,6 @@ export default function AnalyticsPage() {
           </div>
         )}
 
-        {/* Shift Close Success Overlay */}
         {showShiftSuccess && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200">
             <div className="flex flex-col items-center justify-center bg-white rounded-[2.5rem] shadow-2xl px-8 sm:px-12 py-10 gap-5 animate-in zoom-in-90 duration-300 overflow-hidden mx-4">
@@ -919,7 +918,7 @@ export default function AnalyticsPage() {
                 </h2>
                 <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">
                   {timeFilter === "Custom" && customDate
-                    ? new Date(customDate).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" })
+                    ? parseLocalISODate(customDate).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" })
                     : timeFilter === "Year" ? "This Year" : timeFilter}
                 </span>
               </div>
@@ -1181,7 +1180,7 @@ export default function AnalyticsPage() {
               </div>
             </div>
 
-            {/* Recent Transactions Table */}
+            {/* Order History Table */}
             <div className="bg-white rounded-[2rem] shadow-md shadow-slate-200/50 border border-slate-100 overflow-hidden">
               <div className="p-4 sm:p-8 border-b border-slate-100 flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-slate-50">
                 <h3 className="font-bold text-slate-900 flex items-center gap-2 tracking-wide text-lg sm:text-xl shrink-0">
@@ -1248,7 +1247,7 @@ export default function AnalyticsPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {transactionOrders.slice(0, 30).map((order) => (
+                      {transactionOrders.slice(0, 50).map((order) => (
                         <tr key={order.id} className="hover:bg-slate-50 transition-colors group">
                           <td className="px-4 sm:px-8 py-5 whitespace-nowrap text-slate-500 font-bold">
                             {new Date(order.created_at).toLocaleDateString()} <span className="ml-2 hidden sm:inline">{new Date(order.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
@@ -1387,7 +1386,7 @@ export default function AnalyticsPage() {
 
         {/* Void Modal */}
         {voidModalOpen && (
-          <div 
+          <div
             className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 no-print"
             onKeyDown={(e) => {
               if (e.key === "Escape") {
@@ -1407,7 +1406,7 @@ export default function AnalyticsPage() {
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              <form 
+              <form
                 className="p-6 space-y-4"
                 onSubmit={async (e) => {
                   e.preventDefault();
@@ -1510,7 +1509,7 @@ export default function AnalyticsPage() {
 
         {/* Return Change Modal */}
         {returnModalOpen && (
-          <div 
+          <div
             className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 no-print"
             onKeyDown={(e) => {
               if (e.key === "Escape") {
@@ -1540,7 +1539,7 @@ export default function AnalyticsPage() {
                   <X className="w-5 h-5" />
                 </button>
               </div>
-              <form 
+              <form
                 className="p-6 space-y-4"
                 onSubmit={async (e) => {
                   e.preventDefault();
@@ -1707,7 +1706,6 @@ export default function AnalyticsPage() {
             </div>
           </div>
         ) : (
-          /* Daily Z-Report View */
           <div className="w-[72mm] font-mono text-black">
             <div className="text-center mb-3 pb-2 border-b-2 border-dashed border-black">
               <h1 className="text-base font-black tracking-tight">{settings?.name || 'Restaurant POS'}</h1>

@@ -4,7 +4,7 @@ import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { Navbar } from "@/components/Navbar";
 import { supabase } from "@/lib/supabase";
 import {
-  Printer, CheckCircle, Clock, UtensilsCrossed, Plus, Search, ShoppingBag, X, Minus, Bike, Trash2
+  Printer, CheckCircle, Clock, UtensilsCrossed, Plus, Search, ShoppingBag, X, Minus, Bike, Trash2, Star, ChevronDown
 } from "lucide-react";
 import MenuItemCard, { MenuItem as CardMenuItem } from "@/components/MenuItemCard";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
@@ -86,6 +86,19 @@ export default function CashierPage() {
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
 
+  // Dynamic tables state with immediate localStorage cache to prevent 8-table flicker
+  const [dbTables, setDbTables] = useState<any[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const cached = localStorage.getItem("pos_cached_restaurant_tables");
+        if (cached) return JSON.parse(cached);
+      } catch (e) {
+        console.warn("Failed to read cached tables:", e);
+      }
+    }
+    return [];
+  });
+
   // Manual Order Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -95,6 +108,92 @@ export default function CashierPage() {
   const [customerName, setCustomerName] = useState("");
   const [specialNotes, setSpecialNotes] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Mobile cart expansion toggle
+  const [isMobileCartExpanded, setIsMobileCartExpanded] = useState(false);
+
+  // Dynamic Fast Moving Item IDs based on historical completed sales
+  const [fastMovingItemIds, setFastMovingItemIds] = useState<string[]>([]);
+
+  // Fetch actual top sold items from completed orders
+  useEffect(() => {
+    const fetchTopSellingItems = async () => {
+      try {
+        const { data, error } = await supabase
+          .from("orders")
+          .select("items")
+          .in("status", ["completed", "Completed"])
+          .order("created_at", { ascending: false })
+          .limit(100);
+
+        if (!error && data && data.length > 0) {
+          const itemSalesMap = new Map<string, number>();
+
+          data.forEach((order: any) => {
+            if (Array.isArray(order.items)) {
+              order.items.forEach((item: any) => {
+                const rawName = String(item.name || "").replace(/\s*\((Regular|Large)\)\s*/gi, "").trim().toLowerCase();
+                const qty = Number(item.quantity || 1);
+                if (rawName) {
+                  itemSalesMap.set(rawName, (itemSalesMap.get(rawName) || 0) + qty);
+                }
+              });
+            }
+          });
+
+          // Sort by top sold
+          const sortedNames = Array.from(itemSalesMap.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 15)
+            .map(([name]) => name);
+
+          setFastMovingItemIds(sortedNames);
+        }
+      } catch (e) {
+        console.warn("Could not calculate fast moving items:", e);
+      }
+    };
+
+    if (isModalOpen) {
+      fetchTopSellingItems();
+    }
+  }, [isModalOpen]);
+
+  // Favorites state persisted in localStorage
+  const [favoriteIds, setFavoriteIds] = useState<string[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("pos_favorite_dishes");
+        return saved ? JSON.parse(saved) : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  });
+
+  const toggleFavorite = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setFavoriteIds((prev) => {
+      const next = prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id];
+      if (typeof window !== "undefined") {
+        localStorage.setItem("pos_favorite_dishes", JSON.stringify(next));
+      }
+      return next;
+    });
+  };
+
+  // F12 Global Key Handler to toggle New Order Modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "F12") {
+        e.preventDefault();
+        setIsModalOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Discount State
   const [discountType, setDiscountType] = useState<"percent" | "fixed">("percent");
@@ -242,6 +341,66 @@ export default function CashierPage() {
     }
   }, [refreshSettings]);
 
+  // Direct Fetch & Realtime sync from restaurant_tables with LocalStorage cache
+  useEffect(() => {
+    const fetchRestaurantTables = async () => {
+      const { data, error } = await supabase
+        .from("restaurant_tables")
+        .select("*")
+        .order("created_at", { ascending: true });
+
+      if (!error && data && data.length > 0) {
+        const sorted = [...data].sort((a, b) => {
+          const numA = parseInt(a.table_no, 10);
+          const numB = parseInt(b.table_no, 10);
+          if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+          return String(a.table_no).localeCompare(String(b.table_no));
+        });
+
+        const formatted = sorted.map((t: any) => ({
+          id: String(t.table_no),
+          name: `Table ${String(t.table_no).padStart(2, "0")}`,
+          capacity: Number(t.capacity || 4),
+          section: t.floor_area || "Tables",
+        }));
+
+        setDbTables(formatted);
+        if (typeof window !== "undefined") {
+          localStorage.setItem("pos_cached_restaurant_tables", JSON.stringify(formatted));
+        }
+      }
+    };
+
+    fetchRestaurantTables();
+
+    const channel = supabase
+      .channel("restaurant_tables_realtime_sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "restaurant_tables" },
+        () => {
+          fetchRestaurantTables();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const tables = useMemo(() => {
+    if (dbTables.length > 0) {
+      return dbTables;
+    }
+    return Array.from({ length: 12 }, (_, i) => ({
+      id: String(i + 1),
+      name: `Table ${String(i + 1).padStart(2, "0")}`,
+      capacity: 4,
+      section: "Tables",
+    }));
+  }, [dbTables]);
+
   const fetchOrders = useCallback(async () => {
     const { data } = await supabase
       .from("orders")
@@ -362,6 +521,7 @@ export default function CashierPage() {
     };
   }, [fetchOrders, setupRealtime]);
 
+  // Standard Industry Calculation for Final Settlement
   const updateOrderStatus = async (id: string, status: OrderStatus, paymentMethod?: string, tendered?: string, change?: number) => {
     if (tendered && change !== undefined) {
       setPrintMetadata({ tendered, change });
@@ -380,19 +540,21 @@ export default function CashierPage() {
         const subtotal = (orderToUpdate.items || []).reduce(
           (sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0
         );
+
         let calcDiscount = 0;
         if (discountType === "percent") {
           calcDiscount = (subtotal * Number(discountValue || 0)) / 100;
         } else {
           calcDiscount = Number(discountValue || 0);
         }
-        const discounted = Math.max(0, subtotal - calcDiscount);
+
         const isDineIn = !orderToUpdate.order_type || orderToUpdate.order_type === 'dine-in';
         const sChargePct = Number(settings?.service_charge_pct ?? 10);
         const tPct = Number(settings?.tax_pct ?? 0);
-        const sCharge = isDineIn ? (discounted * sChargePct) / 100 : 0;
-        const tax = (discounted * tPct) / 100;
-        const grandTotal = discounted + sCharge + tax;
+        const sCharge = isDineIn ? (subtotal * sChargePct) / 100 : 0;
+        const tax = (subtotal * tPct) / 100;
+
+        const grandTotal = Math.max(0, subtotal + sCharge + tax - calcDiscount);
 
         updateData.total_amount = Number(grandTotal);
         updateData.discount = Number(calcDiscount);
@@ -429,7 +591,7 @@ export default function CashierPage() {
       if (orderToUpdate) {
         const isDineIn = !orderToUpdate?.order_type || orderToUpdate?.order_type === 'dine-in';
         if (!isDineIn) {
-          triggerSafePrint({ ...orderToUpdate, payment_method: paymentMethod || orderToUpdate.payment_method } as Order, false, () => {
+          triggerSafePrint({ ...orderToUpdate, discount: updateData.discount, total_amount: updateData.total_amount, payment_method: paymentMethod || orderToUpdate.payment_method } as Order, false, () => {
             cleanup();
             setPrintMetadata(null);
           });
@@ -490,13 +652,12 @@ export default function CashierPage() {
 
     const subtotal = newItems.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity)), 0);
     const discount = Number(order.discount || 0);
-    const discounted = Math.max(0, subtotal - discount);
     const isDineIn = !order.order_type || order.order_type === 'dine-in';
     const sChargePct = Number(settings?.service_charge_pct ?? 10);
     const tPct = Number(settings?.tax_pct ?? 0);
-    const sCharge = isDineIn ? (discounted * sChargePct) / 100 : 0;
-    const tax = (discounted * tPct) / 100;
-    const grandTotal = discounted + sCharge + tax;
+    const sCharge = isDineIn ? (subtotal * sChargePct) / 100 : 0;
+    const tax = (subtotal * tPct) / 100;
+    const grandTotal = Math.max(0, subtotal + sCharge + tax - discount);
 
     setOrders(prev => prev.map(o => o.id === orderId ? { ...o, items: newItems, total_amount: grandTotal } : o));
 
@@ -628,14 +789,7 @@ export default function CashierPage() {
     triggerSafePrint(bill, false);
   };
 
-  const handlePrintBill = (id: string) => {
-    setBilledOrders(prev => new Set(prev).add(id));
-    const orderToPrint = orders.find(o => o.id === id);
-    if (orderToPrint) triggerSafePrint(orderToPrint, false);
-  };
-
   const selectedOrder = orders.find(o => o.id === selectedOrderId);
-  const receiptOrder = printOrderData || selectedOrder;
 
   const serviceChargePct = Number(settings?.service_charge_pct ?? 10);
   const taxPct = Number(settings?.tax_pct ?? 0);
@@ -646,7 +800,6 @@ export default function CashierPage() {
   let selectedOrderServiceCharge = 0;
   let selectedOrderTax = 0;
   let selectedOrderSubtotal = 0;
-  let discountedSubtotal = 0;
 
   if (selectedOrder) {
     selectedOrderSubtotal = (selectedOrder.items || []).reduce(
@@ -664,13 +817,27 @@ export default function CashierPage() {
       }
     }
 
-    discountedSubtotal = Math.max(0, selectedOrderSubtotal - calculatedDiscount);
     const isDineIn = !selectedOrder.order_type || selectedOrder.order_type === 'dine-in';
-    selectedOrderServiceCharge = isDineIn ? (discountedSubtotal * serviceChargePct) / 100 : 0;
-    selectedOrderTax = (discountedSubtotal * taxPct) / 100;
+    selectedOrderServiceCharge = isDineIn ? (selectedOrderSubtotal * serviceChargePct) / 100 : 0;
+    selectedOrderTax = (selectedOrderSubtotal * taxPct) / 100;
 
-    finalGrandTotal = discountedSubtotal + selectedOrderServiceCharge + selectedOrderTax;
+    finalGrandTotal = Math.max(0, selectedOrderSubtotal + selectedOrderServiceCharge + selectedOrderTax - calculatedDiscount);
   }
+
+  const handlePrintBill = (id: string) => {
+    setBilledOrders(prev => new Set(prev).add(id));
+    const orderToPrint = orders.find(o => o.id === id);
+    if (orderToPrint) {
+      const billPayload: Order = {
+        ...orderToPrint,
+        discount: calculatedDiscount,
+        total_amount: finalGrandTotal
+      };
+      triggerSafePrint(billPayload, false);
+    }
+  };
+
+  const receiptOrder = printOrderData || selectedOrder;
 
   useEffect(() => {
     setDiscountValue(0);
@@ -680,16 +847,6 @@ export default function CashierPage() {
     setShowCashCalculator(false);
     setCashGiven("");
   }, [selectedOrderId]);
-
-  // Clean 8 Tables
-  const tables = (settings?.tables && Array.isArray(settings.tables) && settings.tables.length > 0)
-    ? settings.tables
-    : Array.from({ length: 8 }, (_, i) => ({
-      id: String(i + 1),
-      name: `Table ${String(i + 1).padStart(2, "0")}`,
-      capacity: 4,
-      section: "Tables"
-    }));
 
   const [dbMenu, setDbMenu] = useState<any[]>([]);
 
@@ -719,7 +876,6 @@ export default function CashierPage() {
     };
   }, []);
 
-  // Groups Regular and Large items seamlessly into a single card object
   const groupedMenu = useMemo(() => {
     const map = new Map<string, CardMenuItem>();
 
@@ -782,9 +938,20 @@ export default function CashierPage() {
 
   const filteredMenu = useMemo(() => {
     let filtered = groupedMenu;
-    if (activeCategory !== "All") {
+
+    if (activeCategory === "⭐ Favorites") {
+      filtered = filtered.filter((item) => favoriteIds.includes(item.id));
+    } else if (activeCategory === "🔥 Fast Moving") {
+      // Dynamic Filter: Shows top selling items based on completed bills (or fallback to popular flag)
+      filtered = filtered.filter((item) => {
+        const cleanBase = item.name.replace(/\s*\((Regular|Large)\)\s*/gi, "").trim().toLowerCase();
+        const isTopSold = fastMovingItemIds.some(name => cleanBase.includes(name) || name.includes(cleanBase));
+        return isTopSold || item.is_popular;
+      });
+    } else if (activeCategory !== "All") {
       filtered = filtered.filter((item) => item.category === activeCategory);
     }
+
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       filtered = filtered.filter(
@@ -792,13 +959,13 @@ export default function CashierPage() {
       );
     }
     return filtered;
-  }, [activeCategory, searchQuery, groupedMenu]);
+  }, [activeCategory, searchQuery, groupedMenu, favoriteIds, fastMovingItemIds]);
 
   const menuCategories = useMemo(() => {
     const cats = Array.from(
       new Set(groupedMenu.map((item) => item.category).filter(Boolean))
     ).sort() as string[];
-    return ["All", ...cats];
+    return ["All", "⭐ Favorites", "🔥 Fast Moving", ...cats];
   }, [groupedMenu]);
 
   const handleAddCardToCart = (item: CardMenuItem, selectedSize: "Regular" | "Large", finalPrice: number) => {
@@ -950,6 +1117,7 @@ export default function CashierPage() {
     }
   };
 
+  // Standard Print Receipt Calculation (Subtotal -> Service Charge -> Less Discount -> Total)
   const printSubtotal = (receiptOrder?.items || []).reduce(
     (sum: number, item: any) => sum + (Number(item.price || 0) * Number(item.quantity || 1)),
     0
@@ -957,7 +1125,8 @@ export default function CashierPage() {
   const printIsDineIn = !receiptOrder?.order_type || receiptOrder?.order_type === 'dine-in';
   const printServiceCharge = printIsDineIn ? (printSubtotal * serviceChargePct) / 100 : 0;
   const printTax = (printSubtotal * taxPct) / 100;
-  const printTotal = Number(receiptOrder?.total_amount || (printSubtotal + printServiceCharge + printTax));
+  const printDiscount = Number(receiptOrder?.discount !== undefined ? receiptOrder.discount : calculatedDiscount);
+  const printTotal = Math.max(0, printSubtotal + printServiceCharge + printTax - printDiscount);
 
   return (
     <ProtectedRoute>
@@ -981,13 +1150,13 @@ export default function CashierPage() {
             <button
               onClick={() => setIsModalOpen(true)}
               className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold shadow-sm shadow-orange-500/20 transition-all whitespace-nowrap"
+              title="Shortcut: Press F12"
             >
-              <Plus className="w-4 h-4" /> New Order
+              <Plus className="w-4 h-4" /> New Order <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-mono ml-1">F12</span>
             </button>
           </div>
         } />
 
-        {/* Error / Info Toast */}
         {errorToast.show && (
           <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[99999] flex items-center gap-2 px-5 py-3 rounded-full shadow-xl font-bold text-sm whitespace-nowrap animate-in fade-in slide-in-from-top-4 no-print"
             style={{ background: errorToast.type === "error" ? "#e11d48" : "#1e293b", color: "#fff" }}
@@ -997,7 +1166,6 @@ export default function CashierPage() {
           </div>
         )}
 
-        {/* Payment Success Overlay */}
         {showPaymentSuccess && lastSettledDetails && (
           <div
             className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-200 no-print"
@@ -1101,7 +1269,7 @@ export default function CashierPage() {
           </div>
         )}
 
-        {/* Mobile Action Pill Bar (below lg) */}
+        {/* Mobile Action Pill Bar */}
         <div className="lg:hidden px-3 sm:px-6 pt-3 pb-1">
           <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-2">
             <button
@@ -1120,7 +1288,7 @@ export default function CashierPage() {
               onClick={() => setIsModalOpen(true)}
               className="flex items-center gap-1.5 px-4 py-2.5 rounded-full bg-orange-500 text-white border-2 border-orange-600 text-sm font-bold shadow-sm shadow-orange-500/20 whitespace-nowrap shrink-0 active:scale-95 transition-all"
             >
-              <Plus className="w-4 h-4" /> New Order
+              <Plus className="w-4 h-4" /> New Order (F12)
             </button>
           </div>
         </div>
@@ -1133,7 +1301,7 @@ export default function CashierPage() {
               <h2 className="font-bold text-slate-800 flex items-center gap-2 tracking-wide text-lg">
                 <UtensilsCrossed className="w-5 h-5 text-indigo-500" /> Dine-in Tables
               </h2>
-              <div className="text-xs font-bold text-slate-500 bg-white px-2 py-1 rounded-lg border border-slate-200">
+              <div className="text-xs font-bold text-slate-500 bg-white px-2.5 py-1 rounded-lg border border-slate-200">
                 {tables.filter((t: any) => orders.some(o => o.table_no === String(t.id) && (!o.order_type || o.order_type === 'dine-in'))).length} / {tables.length} Occupied
               </div>
             </div>
@@ -1296,12 +1464,27 @@ export default function CashierPage() {
                     ))}
                   </div>
 
-                  {/* Breakdown */}
+                  {/* Breakdown according to Industry Standard */}
                   <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 space-y-2 text-sm font-bold text-slate-600">
                     <div className="flex justify-between">
                       <span>Subtotal</span>
                       <span>{currencySymbol} {selectedOrderSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                     </div>
+
+                    {(!selectedOrder.order_type || selectedOrder.order_type === 'dine-in') && (
+                      <div className="flex justify-between text-slate-500">
+                        <span>Service Charge ({serviceChargePct}% on Subtotal):</span>
+                        <span>{currencySymbol} {selectedOrderServiceCharge.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      </div>
+                    )}
+
+                    {taxPct > 0 && (
+                      <div className="flex justify-between text-slate-500">
+                        <span>Tax ({taxPct}% on Subtotal):</span>
+                        <span>{currencySymbol} {selectedOrderTax.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      </div>
+                    )}
+
                     {calculatedDiscount > 0 && (() => {
                       const discountPct = Math.round((calculatedDiscount / selectedOrderSubtotal) * 100);
                       const isLikelyPercent = discountPct > 0 && Math.abs(calculatedDiscount - ((selectedOrderSubtotal * discountPct) / 100)) < 0.1;
@@ -1312,16 +1495,7 @@ export default function CashierPage() {
                         </div>
                       );
                     })()}
-                    {(!selectedOrder.order_type || selectedOrder.order_type === 'dine-in') && (
-                      <div className="flex justify-between text-slate-500">
-                        <span>Service Charge ({serviceChargePct}%):</span>
-                        <span>{currencySymbol} {selectedOrderServiceCharge.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                      </div>
-                    )}
-                    <div className="flex justify-between text-slate-500">
-                      <span>Tax ({taxPct}%):</span>
-                      <span>{currencySymbol} {selectedOrderTax.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                    </div>
+
                     <div className="flex justify-between text-2xl text-slate-900 pt-4 border-t border-slate-200 mt-3">
                       <span>Total Amount</span>
                       <span className="text-emerald-600">{currencySymbol} {finalGrandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -1400,15 +1574,13 @@ export default function CashierPage() {
                               let v = Number(customDiscountInput);
                               if (!isNaN(v) && v >= 0 && selectedOrder) {
                                 if (discountType === 'percent' && v > 100) v = 100;
-                                const subtotal = (selectedOrder.items || []).reduce((sum: number, item: any) => sum + (Number(item.price) * Number(item.quantity)), 0);
-                                const calcDiscount = discountType === 'percent' ? (subtotal * v) / 100 : v;
-                                const discounted = Math.max(0, subtotal - calcDiscount);
+                                const calcDiscount = discountType === 'percent' ? (selectedOrderSubtotal * v) / 100 : v;
                                 const isDineIn = !selectedOrder.order_type || selectedOrder.order_type === 'dine-in';
                                 const sChargePct = Number(settings?.service_charge_pct ?? 10);
                                 const tPct = Number(settings?.tax_pct ?? 0);
-                                const sCharge = isDineIn ? (discounted * sChargePct) / 100 : 0;
-                                const tax = (discounted * tPct) / 100;
-                                const grandTotal = discounted + sCharge + tax;
+                                const sCharge = isDineIn ? (selectedOrderSubtotal * sChargePct) / 100 : 0;
+                                const tax = (selectedOrderSubtotal * tPct) / 100;
+                                const grandTotal = Math.max(0, selectedOrderSubtotal + sCharge + tax - calcDiscount);
 
                                 setOrders(prev => prev.map(o => o.id === selectedOrder.id ? { ...o, discount: calcDiscount, total_amount: grandTotal } : o));
 
@@ -1438,15 +1610,13 @@ export default function CashierPage() {
                               let v = Number(customDiscountInput);
                               if (!isNaN(v) && v >= 0 && selectedOrder) {
                                 if (discountType === 'percent' && v > 100) v = 100;
-                                const subtotal = (selectedOrder.items || []).reduce((sum: number, item: any) => sum + (Number(item.price) * Number(item.quantity)), 0);
-                                const calcDiscount = discountType === 'percent' ? (subtotal * v) / 100 : v;
-                                const discounted = Math.max(0, subtotal - calcDiscount);
+                                const calcDiscount = discountType === 'percent' ? (selectedOrderSubtotal * v) / 100 : v;
                                 const isDineIn = !selectedOrder.order_type || selectedOrder.order_type === 'dine-in';
                                 const sChargePct = Number(settings?.service_charge_pct ?? 10);
                                 const tPct = Number(settings?.tax_pct ?? 0);
-                                const sCharge = isDineIn ? (discounted * sChargePct) / 100 : 0;
-                                const tax = (discounted * tPct) / 100;
-                                const grandTotal = discounted + sCharge + tax;
+                                const sCharge = isDineIn ? (selectedOrderSubtotal * sChargePct) / 100 : 0;
+                                const tax = (selectedOrderSubtotal * tPct) / 100;
+                                const grandTotal = Math.max(0, selectedOrderSubtotal + sCharge + tax - calcDiscount);
 
                                 setOrders(prev => prev.map(o => o.id === selectedOrder.id ? { ...o, discount: calcDiscount, total_amount: grandTotal } : o));
 
@@ -1581,7 +1751,6 @@ export default function CashierPage() {
                       />
                     </div>
 
-                    {/* Quick Presets */}
                     <div className="grid grid-cols-2 gap-2">
                       <button type="button" onClick={() => setCashGiven(String(stagedDirectOrder ? stagedDirectOrder.total_amount : finalGrandTotal))} className="py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm font-bold text-slate-700">Exact</button>
                       <button type="button" onClick={() => setCashGiven(String(Math.ceil((stagedDirectOrder ? stagedDirectOrder.total_amount : finalGrandTotal) / 500) * 500))} className="py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm font-bold text-slate-700">Nearest 500</button>
@@ -1589,7 +1758,6 @@ export default function CashierPage() {
                       <button type="button" onClick={() => setCashGiven("5000")} className="py-2 bg-slate-100 hover:bg-slate-200 rounded-lg text-sm font-bold text-slate-700">5,000</button>
                     </div>
 
-                    {/* Change / Due Badge */}
                     <div className="p-4 rounded-xl border flex flex-col justify-center items-center">
                       {Number(cashGiven || 0) >= (stagedDirectOrder ? stagedDirectOrder.total_amount : finalGrandTotal) ? (
                         <div className="text-center text-emerald-600 bg-emerald-50 w-full p-2 rounded-lg border border-emerald-100">
@@ -1724,11 +1892,10 @@ export default function CashierPage() {
                         (sum, item) => sum + (Number(item.price) * Number(item.quantity)), 0
                       );
                       const discount = Number(bill.discount || 0);
-                      const discounted = Math.max(0, subtotal - discount);
                       const isDineIn = !bill.order_type || bill.order_type === 'dine-in';
-                      const sCharge = isDineIn ? (discounted * serviceChargePct) / 100 : 0;
-                      const tax = (discounted * taxPct) / 100;
-                      const grandTotal = discounted + sCharge + tax;
+                      const sCharge = isDineIn ? (subtotal * serviceChargePct) / 100 : 0;
+                      const tax = (subtotal * taxPct) / 100;
+                      const grandTotal = Math.max(0, subtotal + sCharge + tax - discount);
 
                       return (
                         <div key={bill.id} className="p-5 hover:bg-slate-50 transition-colors flex flex-col gap-3">
@@ -1754,9 +1921,9 @@ export default function CashierPage() {
                           </div>
                           <div className="bg-slate-100 p-3 rounded-xl text-xs font-bold text-slate-600 flex flex-col gap-1">
                             <div className="flex justify-between"><span>Subtotal:</span><span>{currencySymbol} {subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
-                            {discount > 0 && <div className="flex justify-between text-rose-500"><span>Discount:</span><span>-{currencySymbol} {discount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>}
                             {isDineIn && <div className="flex justify-between"><span>Service Charge ({serviceChargePct}%):</span><span>{currencySymbol} {sCharge.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>}
                             {taxPct > 0 && <div className="flex justify-between"><span>Tax ({taxPct}%):</span><span>{currencySymbol} {tax.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>}
+                            {discount > 0 && <div className="flex justify-between text-rose-500"><span>Discount:</span><span>-{currencySymbol} {discount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>}
                             <div className="flex justify-between text-sm text-slate-900 border-t border-slate-200 pt-1 mt-1">
                               <span>Grand Total:</span>
                               <span className="text-emerald-600">{currencySymbol} {grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -1877,46 +2044,53 @@ export default function CashierPage() {
           </div>
         )}
 
-        {/* Manual Order Modal - Fast Cashier POS with Vertical Category Tabs */}
+        {/* Manual Order Modal - Fully Responsive & Mobile Optimized */}
         {isModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-2 sm:p-4 lg:p-6 overflow-hidden">
-            <div className="w-full max-w-7xl h-[94vh] sm:h-[90vh] bg-white rounded-3xl shadow-2xl flex flex-col lg:flex-row overflow-hidden border border-slate-200 relative animate-in zoom-in-95 duration-200">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-0 sm:p-4 lg:p-6 overflow-hidden">
+            <div className="w-full max-w-7xl h-full sm:h-[90vh] bg-white rounded-none sm:rounded-3xl shadow-2xl flex flex-col lg:flex-row overflow-hidden border-0 sm:border border-slate-200 relative animate-in zoom-in-95 duration-200">
+
+              {/* Close Button */}
               <button
                 onClick={() => setIsModalOpen(false)}
-                className="absolute top-3 right-3 sm:top-4 sm:right-4 p-2 bg-slate-100 hover:bg-slate-200 rounded-full text-slate-500 z-30 transition-colors shadow-sm"
+                className="absolute top-3 right-3 sm:top-4 sm:right-4 p-2 bg-slate-100 hover:bg-slate-200 rounded-full text-slate-500 z-40 transition-colors shadow-sm"
               >
                 <X className="w-5 h-5 sm:w-6 sm:h-6" />
               </button>
 
-              {/* 1. Fast Vertical Category Sidebar */}
-              <div className="w-full lg:w-48 xl:w-52 bg-slate-50 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col shrink-0">
-                <div className="p-4 border-b border-slate-200/80 bg-white">
+              {/* 1. Categories Sidebar: Perfectly scrollable on desktop & mobile */}
+              <div className="w-full lg:w-48 xl:w-56 bg-slate-50 border-b lg:border-b-0 lg:border-r border-slate-200 flex flex-col shrink-0 min-h-0">
+                <div className="hidden lg:block p-4 border-b border-slate-200/80 bg-white shrink-0">
                   <span className="text-xs font-black uppercase tracking-wider text-slate-400">Categories</span>
                 </div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1">
+
+                {/* Vertical scrollable on desktop with smooth mousewheel & drag, Horizontal on mobile */}
+                <div className="flex lg:flex-col overflow-x-auto lg:overflow-y-auto no-scrollbar lg:max-h-[calc(90vh-65px)] p-2 lg:p-2.5 gap-1.5 lg:space-y-1 shrink-0 flex-1 min-h-0">
                   {menuCategories.map((cat) => {
                     const isSelected = activeCategory === cat;
+                    const isSpecialTab = cat === "⭐ Favorites" || cat === "🔥 Fast Moving";
                     return (
                       <button
                         key={cat}
                         type="button"
                         onClick={() => setActiveCategory(cat)}
-                        className={`w-full text-left px-3 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all flex items-center justify-between ${isSelected
-                          ? "bg-orange-500 text-white shadow-md shadow-orange-500/30 scale-[1.02]"
-                          : "text-slate-600 hover:bg-slate-200/70 hover:text-slate-900"
+                        className={`text-left px-3 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all whitespace-nowrap flex items-center justify-between shrink-0 cursor-pointer ${isSelected
+                          ? "bg-orange-500 text-white shadow-md shadow-orange-500/30 scale-[1.01]"
+                          : isSpecialTab
+                            ? "bg-orange-50/80 text-orange-700 hover:bg-orange-100/80 border border-orange-200/60 lg:border-transparent"
+                            : "text-slate-600 hover:bg-slate-200/70 hover:text-slate-900 bg-white lg:bg-transparent border border-slate-200 lg:border-transparent"
                           }`}
                       >
                         <span className="truncate">{cat}</span>
-                        {isSelected && <span className="w-1.5 h-1.5 rounded-full bg-white ml-2 shrink-0" />}
+                        {isSelected && <span className="hidden lg:inline-block w-1.5 h-1.5 rounded-full bg-white ml-2 shrink-0" />}
                       </button>
                     );
                   })}
                 </div>
               </div>
 
-              {/* 2. Middle Panel: Menu Items Grid */}
+              {/* 2. Middle Section: Search & Food Dishes Grid */}
               <div className="flex-1 flex flex-col min-h-0 bg-white overflow-hidden border-b lg:border-b-0 lg:border-r border-slate-200">
-                <div className="p-4 sm:p-5 border-b border-slate-100 flex items-center gap-3 shrink-0">
+                <div className="p-3 sm:p-5 border-b border-slate-100 flex items-center gap-3 shrink-0">
                   <div className="relative flex-1">
                     <Search className="w-4 h-4 absolute left-3.5 top-1/2 transform -translate-y-1/2 text-slate-400" />
                     <input
@@ -1932,48 +2106,96 @@ export default function CashierPage() {
                   </span>
                 </div>
 
-                <div className="flex-1 p-4 overflow-y-auto will-change-scroll bg-slate-50/40">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
-                    {filteredMenu.map((item) => (
-                      <MenuItemCard
-                        key={item.id}
-                        item={item}
-                        currencySymbol={currencySymbol}
-                        onAddToCart={handleAddCardToCart}
-                      />
-                    ))}
-                  </div>
+                <div className="flex-1 p-3 sm:p-4 overflow-y-auto will-change-scroll bg-slate-50/40 pb-24 lg:pb-4">
+                  {filteredMenu.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-slate-400 py-12">
+                      <UtensilsCrossed className="w-12 h-12 mb-3 opacity-20" />
+                      <p className="font-bold text-sm text-slate-500">No items found</p>
+                      <p className="text-xs text-slate-400 mt-1">
+                        {activeCategory === "⭐ Favorites"
+                          ? "Click the star (⭐) icon on any dish to add to favorites!"
+                          : activeCategory === "🔥 Fast Moving"
+                            ? "Completed order sales will automatically show top sellers here!"
+                            : "Try selecting another category or clear search filter."}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+                      {filteredMenu.map((item) => {
+                        const isFav = favoriteIds.includes(item.id);
+                        return (
+                          <div key={item.id} className="relative group">
+                            <button
+                              type="button"
+                              onClick={(e) => toggleFavorite(item.id, e)}
+                              title={isFav ? "Remove from Favorites" : "Add to Favorites"}
+                              className={`absolute top-2 right-2 z-20 p-1.5 rounded-full shadow-sm transition-all active:scale-90 ${isFav
+                                ? "bg-amber-400 text-white shadow-amber-400/40"
+                                : "bg-white/90 text-slate-400 hover:text-amber-500 hover:bg-white"
+                                }`}
+                            >
+                              <Star className={`w-3.5 h-3.5 ${isFav ? "fill-white stroke-white" : "stroke-[2.5]"}`} />
+                            </button>
+
+                            <MenuItemCard
+                              item={item}
+                              currencySymbol={currencySymbol}
+                              onAddToCart={handleAddCardToCart}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* 3. Right Panel: Cart & Details */}
-              <div className="w-full lg:w-[380px] xl:w-[420px] bg-white flex flex-col relative shrink-0 min-h-0 overflow-hidden">
-                <div className="p-4 border-b border-slate-100 bg-slate-50 shrink-0">
-                  <h2 className="text-base sm:text-lg font-bold text-slate-900 mb-3 flex items-center gap-2">
+              {/* 3. Right Section: Cart & Order Details */}
+              <div className={`w-full lg:w-[380px] xl:w-[420px] bg-white flex flex-col relative shrink-0 min-h-0 overflow-hidden ${isMobileCartExpanded ? 'fixed inset-0 z-50 h-full' : 'hidden lg:flex'
+                }`}>
+
+                {/* Header with Mobile Close button */}
+                <div className="p-4 border-b border-slate-100 bg-slate-50 shrink-0 flex justify-between items-center">
+                  <h2 className="text-base sm:text-lg font-bold text-slate-900 flex items-center gap-2">
                     <ShoppingBag className="w-4 h-4 text-orange-500" /> Order Details
                   </h2>
+                  {isMobileCartExpanded && (
+                    <button
+                      onClick={() => setIsMobileCartExpanded(false)}
+                      className="lg:hidden p-1.5 bg-slate-200 hover:bg-slate-300 rounded-full text-slate-600 transition-colors"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
 
+                <div className="p-4 bg-slate-50 border-b border-slate-100 shrink-0">
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2.5">
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Order Type & Table</label>
-                      <select
-                        value={orderType}
-                        onChange={(e) => setOrderType(e.target.value as any)}
-                        className="w-full bg-white border border-slate-200 rounded-xl p-2.5 font-bold text-slate-900 focus:border-orange-500 outline-none shadow-sm text-xs"
-                      >
-                        <option value="takeaway">🛍️ Takeaway</option>
-                        <option value="delivery">🛵 Delivery</option>
-                        <optgroup label="Dine-in Tables">
-                          {tables.map(t => {
-                            const tableNum = typeof t === 'object' ? String((t as any).id) : String(t);
-                            return (
-                              <option key={tableNum} value={`dine-in-${tableNum}`}>
-                                🍽️ Table {tableNum.padStart(2, '0')}
-                              </option>
-                            );
-                          })}
-                        </optgroup>
-                      </select>
+                      <div className="relative">
+                        <select
+                          value={orderType}
+                          onChange={(e) => setOrderType(e.target.value as any)}
+                          className="w-full bg-white border border-slate-200 rounded-xl pl-3.5 pr-10 py-2.5 font-bold text-slate-900 focus:border-orange-500 outline-none shadow-sm text-xs appearance-none cursor-pointer"
+                        >
+                          <option value="takeaway">🛍️ Takeaway</option>
+                          <option value="delivery">🛵 Delivery</option>
+                          <optgroup label="Dine-in Tables">
+                            {tables.map(t => {
+                              const tableNum = typeof t === 'object' ? String((t as any).id) : String(t);
+                              return (
+                                <option key={tableNum} value={`dine-in-${tableNum}`}>
+                                  🍽️ Table {tableNum.padStart(2, '0')}
+                                </option>
+                              );
+                            })}
+                          </optgroup>
+                        </select>
+                        <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-slate-400">
+                          <ChevronDown className="w-4 h-4" />
+                        </div>
+                      </div>
                     </div>
 
                     <div>
@@ -2007,14 +2229,14 @@ export default function CashierPage() {
                             onClick={() => updateCart(item, -1)}
                             className="w-6 h-6 flex items-center justify-center bg-white rounded text-slate-700 shadow-sm border border-slate-100 active:scale-90"
                           >
-                            <Minus className="w-3 h-3" />
+                            <Minus className="w-3.5 h-3.5" />
                           </button>
                           <span className="w-4 text-center font-bold text-slate-900 text-xs">{item.quantity}</span>
                           <button
                             onClick={() => updateCart(item, 1)}
                             className="w-6 h-6 flex items-center justify-center bg-orange-500 text-white rounded shadow-sm active:scale-90"
                           >
-                            <Plus className="w-3 h-3" />
+                            <Plus className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
@@ -2089,6 +2311,28 @@ export default function CashierPage() {
                   </div>
                 </div>
               </div>
+
+              {/* Mobile Floating Bottom Cart Bar */}
+              {cart.length > 0 && !isMobileCartExpanded && (
+                <div className="lg:hidden absolute bottom-3 left-3 right-3 z-40 bg-slate-900 text-white p-3.5 rounded-2xl shadow-xl flex items-center justify-between animate-in slide-in-from-bottom-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-orange-500 flex items-center justify-center font-black text-sm">
+                      {cart.reduce((sum, item) => sum + item.quantity, 0)}
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Cart Total</p>
+                      <p className="text-base font-black text-white">{currencySymbol} {cartTotal.toLocaleString()}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIsMobileCartExpanded(true)}
+                    className="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-xs font-bold rounded-xl transition-all shadow-md active:scale-95"
+                  >
+                    View Cart & Order →
+                  </button>
+                </div>
+              )}
+
             </div>
           </div>
         )}
@@ -2194,39 +2438,44 @@ export default function CashierPage() {
                 <span>Subtotal:</span>
                 <span>{currencySymbol} {printSubtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
-              {(receiptOrder?.discount || 0) > 0 && (() => {
-                const discountAmt = Number(receiptOrder.discount);
-                const discountPct = Math.round((discountAmt / printSubtotal) * 100);
-                const isLikelyPercent = discountPct > 0 && Math.abs(discountAmt - ((printSubtotal * discountPct) / 100)) < 0.1;
-                return (
-                  <div className="flex justify-between text-slate-600">
-                    <span>Discount {isLikelyPercent ? `(${discountPct}%)` : ''}:</span>
-                    <span>-{currencySymbol} {discountAmt.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  </div>
-                );
-              })()}
+
               {printIsDineIn && (
                 <div className="flex justify-between text-slate-600">
                   <span>Service Charge ({serviceChargePct}%):</span>
                   <span>{currencySymbol} {printServiceCharge.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
               )}
+
               {taxPct > 0 && (
                 <div className="flex justify-between text-slate-600">
                   <span>Tax ({taxPct}%):</span>
                   <span>{currencySymbol} {printTax.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                 </div>
               )}
+
+              {printDiscount > 0 && (() => {
+                const discountPct = Math.round((printDiscount / printSubtotal) * 100);
+                const isLikelyPercent = discountPct > 0 && Math.abs(printDiscount - ((printSubtotal * discountPct) / 100)) < 0.1;
+                return (
+                  <div className="flex justify-between text-slate-600">
+                    <span>Discount {isLikelyPercent ? `(${discountPct}%)` : ''}:</span>
+                    <span>-{currencySymbol} {printDiscount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                );
+              })()}
+
               <div className="flex justify-between text-sm font-black border-t-2 border-black pt-1">
                 <span>TOTAL:</span>
                 <span>{currencySymbol} {printTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
               </div>
+
               {receiptOrder.payment_method && (
                 <div className="flex justify-between text-[10px] font-normal pt-1">
                   <span>Payment:</span>
                   <span>{receiptOrder.payment_method}</span>
                 </div>
               )}
+
               {printMetadata && printMetadata.tendered && (
                 <>
                   <div className="flex justify-between text-[10px] font-normal pt-1">

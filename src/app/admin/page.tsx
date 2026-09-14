@@ -1,17 +1,17 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useRouter } from "next/navigation";
 import { Navbar } from "@/components/Navbar";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { useSettings } from "@/context/SettingsContext";
 import {
   UtensilsCrossed, Settings as SettingsIcon, Plus, Check, Search,
   Pencil, Trash2, X, Leaf, Flame, Image as ImageIcon, Lock, Loader2,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, ArrowLeft, Tag
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
-// Menu එකේ භාවිත කළ Unsplash fallback images සිතියම
 const CATEGORY_IMAGES: Record<string, string> = {
   "Fried Rice (Keeri Samba)": "https://images.unsplash.com/photo-1603133872878-684f208fb84b?w=300&q=60&auto=format&fit=crop",
   "Fried Rice (Basmathi)": "https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?w=300&q=60&auto=format&fit=crop",
@@ -33,13 +33,36 @@ const CATEGORY_IMAGES: Record<string, string> = {
 const DEFAULT_FOOD_IMG = "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=300&q=60&auto=format&fit=crop";
 
 export default function AdminPage() {
-  // --- Admin Access Lock States ---
+  const router = useRouter();
+
+  // Admin Access Lock States
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
 
-  // Check PIN function
+  // Close or go back safely
+  const handleExitPinModal = useCallback(() => {
+    if (window.history.length > 1) {
+      router.back();
+    } else {
+      router.push("/cashier");
+    }
+  }, [router]);
+
+  // Global ESC Key Handler to exit PIN modal
+  useEffect(() => {
+    if (isUnlocked) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        handleExitPinModal();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isUnlocked, handleExitPinModal]);
+
   const handleVerifyPin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pinInput || isVerifying) return;
@@ -87,7 +110,6 @@ export default function AdminPage() {
 
   const [isSaving, setIsSaving] = useState(false);
 
-  // --- Toast state ---
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -97,19 +119,16 @@ export default function AdminPage() {
     toastTimer.current = setTimeout(() => setToast(null), 3500);
   }, []);
 
-  // --- Menu Item State ---
   const [menuItems, setMenuItems] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
 
-  // Database එකේ සැබෑ categories පමණක් මෙතැනට ලබා ගැනීම
-  const categories = [
-    "All",
-    ...Array.from(new Set(menuItems.map((i) => i.category).filter(Boolean))).sort(),
-  ];
-
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<any | null>(null);
+
+  // New Category Creation Support
+  const [isCreatingNewCategory, setIsCreatingNewCategory] = useState(false);
+  const [newCategoryInput, setNewCategoryInput] = useState("");
 
   const defaultForm = {
     name: "",
@@ -205,14 +224,22 @@ export default function AdminPage() {
   };
 
   const handleSaveMenu = async () => {
+    const finalCategory = (isCreatingNewCategory ? newCategoryInput.trim() : menuForm.category.trim()) || "Mains";
+
     if (!menuForm.name || menuForm.price <= 0) {
       showToast("Please provide a valid name and price greater than 0.", "error");
+      return;
+    }
+
+    if (isCreatingNewCategory && !newCategoryInput.trim()) {
+      showToast("Please enter a name for the new category.", "error");
       return;
     }
 
     setIsSaving(true);
     const payload = {
       ...menuForm,
+      category: finalCategory,
       image_url: menuForm.image_url || "",
     };
 
@@ -223,61 +250,167 @@ export default function AdminPage() {
     } else {
       const { error } = await supabase.from("menu_items").insert([payload]);
       if (error) showToast("Error creating item: " + error.message, "error");
-      else showToast("Item created successfully!");
+      else showToast(`Dish created under "${finalCategory}"!`);
     }
 
     setIsSaving(false);
     setIsModalOpen(false);
     setEditingItem(null);
+    setIsCreatingNewCategory(false);
+    setNewCategoryInput("");
     setMenuForm(defaultForm);
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this dish?")) return;
-    const { error } = await supabase.from("menu_items").delete().eq("id", id);
+  // Group Regular and Large together as single Card in Admin
+  const groupedMenu = useMemo(() => {
+    const map = new Map<string, any>();
+
+    menuItems.forEach((item) => {
+      const isRegular = item.name.includes("(Regular)");
+      const isLarge = item.name.includes("(Large)");
+
+      if (isRegular || isLarge) {
+        const baseName = item.name.replace(/\s*\((Regular|Large)\)\s*/gi, "").trim();
+        const groupKey = `${item.category}-${baseName}`;
+
+        if (!map.has(groupKey)) {
+          map.set(groupKey, {
+            ...item,
+            id: item.id,
+            baseName: baseName,
+            regularItem: isRegular ? item : null,
+            largeItem: isLarge ? item : null,
+          });
+        } else {
+          const existing = map.get(groupKey);
+          if (isLarge) existing.largeItem = item;
+          if (isRegular) {
+            existing.regularItem = item;
+            existing.id = item.id;
+          }
+        }
+      } else {
+        map.set(item.id, {
+          ...item,
+          baseName: item.name,
+          regularItem: item,
+          largeItem: null,
+        });
+      }
+    });
+
+    return Array.from(map.values());
+  }, [menuItems]);
+
+  const categories = useMemo(() => {
+    const cats = Array.from(new Set(groupedMenu.map((i) => i.category).filter(Boolean))).sort();
+    return ["All", ...cats];
+  }, [groupedMenu]);
+
+  const filteredMenu = useMemo(() => {
+    return groupedMenu.filter((item) => {
+      const matchesSearch = item.baseName.toLowerCase().includes(searchQuery.toLowerCase());
+      const matchesCategory = activeCategory === "All" || item.category === activeCategory;
+      return matchesSearch && matchesCategory;
+    });
+  }, [groupedMenu, searchQuery, activeCategory]);
+
+  const handleDelete = async (groupedDish: any) => {
+    if (!confirm(`Are you sure you want to delete "${groupedDish.baseName}"?`)) return;
+
+    const idsToDelete: string[] = [];
+    if (groupedDish.regularItem) idsToDelete.push(groupedDish.regularItem.id);
+    if (groupedDish.largeItem) idsToDelete.push(groupedDish.largeItem.id);
+    if (idsToDelete.length === 0 && groupedDish.id) idsToDelete.push(groupedDish.id);
+
+    const { error } = await supabase.from("menu_items").delete().in("id", idsToDelete);
     if (error) showToast("Failed to delete item.", "error");
-    else showToast("Dish deleted.");
+    else {
+      setMenuItems((prev) => prev.filter((i) => !idsToDelete.includes(i.id)));
+      showToast("Dish deleted.");
+    }
   };
 
-  const toggleAvailability = async (id: string, current: boolean) => {
-    await supabase.from("menu_items").update({ is_available: !current }).eq("id", id);
+  const toggleAvailability = async (groupedDish: any) => {
+    const currentlyAvailable = (groupedDish.regularItem?.is_available ?? groupedDish.is_available) ||
+      (groupedDish.largeItem?.is_available ?? false);
+    const newStatus = !currentlyAvailable;
+    const baseName = groupedDish.baseName;
+
+    const idsToUpdate: string[] = [];
+    if (groupedDish.regularItem) idsToUpdate.push(groupedDish.regularItem.id);
+    if (groupedDish.largeItem) idsToUpdate.push(groupedDish.largeItem.id);
+    if (idsToUpdate.length === 0 && groupedDish.id) idsToUpdate.push(groupedDish.id);
+
+    setMenuItems((prev) =>
+      prev.map((i) => {
+        const iBase = i.name.replace(/\s*\((Regular|Large)\)\s*/gi, "").trim();
+        if (iBase === baseName || idsToUpdate.includes(i.id)) {
+          return { ...i, is_available: newStatus };
+        }
+        return i;
+      })
+    );
+
+    const { error } = await supabase
+      .from("menu_items")
+      .update({ is_available: newStatus })
+      .in("id", idsToUpdate);
+
+    if (error) {
+      showToast("Failed to update status: " + error.message, "error");
+      fetchMenu();
+    } else {
+      showToast(newStatus ? `${baseName} is now In Stock` : `${baseName} marked as Sold Out`);
+    }
   };
 
-  const openEditModal = (item: any) => {
-    setEditingItem(item);
+  const openEditModal = (groupedDish: any) => {
+    const itemToEdit = groupedDish.regularItem || groupedDish;
+    setEditingItem(itemToEdit);
+    setIsCreatingNewCategory(false);
+    setNewCategoryInput("");
     setMenuForm({
-      name: item.name,
-      category: item.category,
-      price: item.price,
-      description: item.description || "",
-      image_url: item.image_url || "",
-      prep_time_minutes: item.prep_time_minutes || 15,
-      is_veg: item.is_veg || false,
-      is_spicy: item.is_spicy || false,
-      is_popular: item.is_popular || false,
-      is_available: item.is_available ?? true,
+      name: groupedDish.baseName,
+      category: itemToEdit.category,
+      price: itemToEdit.price,
+      description: itemToEdit.description ? itemToEdit.description.replace(/\(Large portion\)/gi, "").trim() : "",
+      image_url: itemToEdit.image_url || "",
+      prep_time_minutes: itemToEdit.prep_time_minutes || 15,
+      is_veg: itemToEdit.is_veg || false,
+      is_spicy: itemToEdit.is_spicy || false,
+      is_popular: itemToEdit.is_popular || false,
+      is_available: itemToEdit.is_available ?? true,
     });
     setIsModalOpen(true);
   };
 
   const openAddModal = () => {
     setEditingItem(null);
-    setMenuForm(defaultForm);
+    setIsCreatingNewCategory(false);
+    setNewCategoryInput("");
+    setMenuForm({
+      ...defaultForm,
+      category: categories.filter((c) => c !== "All")[0] || "Mains",
+    });
     setIsModalOpen(true);
   };
 
-  const filteredMenu = menuItems.filter((item) => {
-    const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCategory = activeCategory === "All" || item.category === activeCategory;
-    return matchesSearch && matchesCategory;
-  });
-
   return (
     <ProtectedRoute>
-      {/* ── PIN LOCK OVERLAY ── */}
       {!isUnlocked && (
         <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
-          <div className="bg-white p-8 rounded-[2rem] shadow-2xl max-w-sm w-full border border-slate-100">
+          <div className="relative bg-white p-8 rounded-[2rem] shadow-2xl max-w-sm w-full border border-slate-100 animate-in zoom-in-95 duration-200">
+            {/* Top Close (X) Button */}
+            <button
+              onClick={handleExitPinModal}
+              className="absolute top-5 right-5 p-2 bg-slate-100 hover:bg-slate-200 rounded-full text-slate-500 hover:text-slate-700 transition-colors shadow-sm"
+              title="Close & Go Back (Esc)"
+              aria-label="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
             <div className="w-16 h-16 rounded-2xl bg-orange-50 text-orange-500 flex items-center justify-center mb-6 shadow-inner border border-orange-100">
               <Lock className="w-8 h-8" />
             </div>
@@ -303,19 +436,28 @@ export default function AdminPage() {
                   </p>
                 )}
               </div>
-              <button
-                type="submit"
-                disabled={!pinInput || isVerifying}
-                className="w-full flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold py-4 rounded-xl transition-all shadow-[0_8px_20px_rgba(15,23,42,0.2)] active:scale-[0.98]"
-              >
-                {isVerifying ? <Loader2 className="w-5 h-5 animate-spin" /> : "Unlock"}
-              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleExitPinModal}
+                  className="flex-1 py-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-all text-sm flex items-center justify-center gap-1.5 active:scale-[0.98]"
+                >
+                  <ArrowLeft className="w-4 h-4" /> Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!pinInput || isVerifying}
+                  className="flex-1 flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white font-bold py-4 rounded-xl transition-all shadow-[0_8px_20px_rgba(15,23,42,0.2)] active:scale-[0.98] text-sm"
+                >
+                  {isVerifying ? <Loader2 className="w-4 h-4 animate-spin" /> : "Unlock"}
+                </button>
+              </div>
             </form>
+            <p className="text-[10px] text-slate-400 text-center mt-4 font-medium">Press <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 font-mono text-[10px]">Esc</kbd> to exit</p>
           </div>
         </div>
       )}
 
-      {/* ── Toast ── */}
       {toast && (
         <div
           className={`fixed top-24 left-1/2 -translate-x-1/2 z-[99999] flex items-center gap-2 px-6 py-3 rounded-full shadow-xl font-bold text-sm animate-in fade-in slide-in-from-top-4 whitespace-nowrap ${toast.type === "error"
@@ -336,7 +478,6 @@ export default function AdminPage() {
         <Navbar />
 
         <div className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-6 flex flex-col gap-6">
-          {/* Header & Tabs */}
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
               <h1 className="text-xl sm:text-2xl font-bold text-slate-800 tracking-tight">Restaurant Admin</h1>
@@ -361,7 +502,6 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* Tab Content */}
           <div className="flex-1 flex flex-col">
             {activeTab === "menu" && (
               <div className="bg-white rounded-2xl shadow-sm border border-slate-100 flex-1 flex flex-col overflow-hidden">
@@ -375,7 +515,6 @@ export default function AdminPage() {
                   </button>
                 </div>
 
-                {/* Filters with Left/Right Arrows for Horizontal Category Scrolling */}
                 <div className="p-4 sm:p-6 border-b border-slate-100 flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-4">
                   <div className="relative flex items-center flex-1 min-w-0">
                     <button
@@ -434,21 +573,25 @@ export default function AdminPage() {
                   </div>
                 </div>
 
-                {/* Dishes Grid with Matching Photos */}
                 <div className="flex-1 p-4 sm:p-6 overflow-y-auto bg-slate-50/30">
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-6">
                     {filteredMenu.map((item) => {
-                      // Menu එකේ පෙන්වන photo එකම Settings එකෙත් පෙන්වීමේ logic එක
                       const displayImg = item.image_url && item.image_url.trim() !== ""
                         ? item.image_url
                         : (CATEGORY_IMAGES[item.category] || DEFAULT_FOOD_IMG);
 
+                      const isAvailable = (item.regularItem?.is_available ?? item.is_available) ||
+                        (item.largeItem?.is_available ?? false);
+
+                      const regPrice = item.regularItem ? item.regularItem.price : item.price;
+                      const lrgPrice = item.largeItem ? item.largeItem.price : null;
+
                       return (
-                        <div key={item.id} className="bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col">
+                        <div key={item.baseName} className="bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col">
                           <div className="h-36 sm:h-40 bg-slate-100 relative">
                             <img
                               src={displayImg}
-                              alt={item.name}
+                              alt={item.baseName}
                               loading="lazy"
                               decoding="async"
                               className="w-full h-full object-cover"
@@ -460,7 +603,7 @@ export default function AdminPage() {
                               {item.is_veg && <span className="bg-emerald-500 text-white p-1.5 rounded-md shadow-sm" title="Vegetarian"><Leaf className="w-3.5 h-3.5" /></span>}
                               {item.is_spicy && <span className="bg-red-500 text-white p-1.5 rounded-md shadow-sm" title="Spicy"><Flame className="w-3.5 h-3.5" /></span>}
                             </div>
-                            {!item.is_available && (
+                            {!isAvailable && (
                               <div className="absolute inset-0 bg-white/60 backdrop-blur-sm flex items-center justify-center">
                                 <span className="bg-slate-900 text-white px-3 py-1 rounded-lg text-[10px] sm:text-xs font-bold uppercase tracking-widest">Unavailable</span>
                               </div>
@@ -468,25 +611,36 @@ export default function AdminPage() {
                           </div>
                           <div className="p-4 flex-1 flex flex-col">
                             <div className="flex justify-between items-start mb-2 gap-2">
-                              <h3 className="font-bold text-sm sm:text-base text-slate-900 leading-tight pr-1 truncate" title={item.name}>{item.name}</h3>
-                              <span className="font-bold text-xs sm:text-sm text-orange-600 whitespace-nowrap">{globalSettings?.currency || "LKR"} {Number(item.price || 0).toLocaleString()}</span>
+                              <h3 className="font-bold text-sm sm:text-base text-slate-900 leading-tight pr-1 truncate" title={item.baseName}>
+                                {item.baseName}
+                              </h3>
+                              <div className="text-right whitespace-nowrap">
+                                <span className="font-bold text-xs sm:text-sm text-orange-600">
+                                  {globalSettings?.currency || "LKR"} {Number(regPrice || 0).toLocaleString()}
+                                </span>
+                                {lrgPrice && (
+                                  <span className="text-[11px] font-bold text-slate-400 block">
+                                    L: {Number(lrgPrice).toLocaleString()}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                             <p className="text-xs sm:text-sm text-slate-500 line-clamp-2 mb-4 flex-1">
-                              {item.description || "Freshly prepared to order."}
+                              {item.description ? item.description.replace(/\(Large portion\)/gi, "").trim() : "Freshly prepared to order."}
                             </p>
                             <div className="flex items-center justify-between pt-3 border-t border-slate-100">
                               <button
-                                onClick={() => toggleAvailability(item.id, item.is_available)}
-                                className={`text-[11px] sm:text-xs font-bold px-3 py-1.5 rounded-lg transition-colors ${item.is_available ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                                onClick={() => toggleAvailability(item)}
+                                className={`text-[11px] sm:text-xs font-bold px-3 py-1.5 rounded-lg transition-colors ${isAvailable ? "bg-emerald-50 text-emerald-700 hover:bg-emerald-100" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                                   }`}
                               >
-                                {item.is_available ? "In Stock" : "Sold Out"}
+                                {isAvailable ? "In Stock" : "Sold Out"}
                               </button>
                               <div className="flex gap-1">
                                 <button onClick={() => openEditModal(item)} className="p-1.5 text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Edit">
                                   <Pencil className="w-4 h-4" />
                                 </button>
-                                <button onClick={() => handleDelete(item.id)} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
+                                <button onClick={() => handleDelete(item)} className="p-1.5 text-red-600 hover:bg-red-50 rounded-lg transition-colors" title="Delete">
                                   <Trash2 className="w-4 h-4" />
                                 </button>
                               </div>
@@ -610,7 +764,6 @@ export default function AdminPage() {
         </div>
       </main>
 
-      {/* Menu Item Modal */}
       {isModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/60 backdrop-blur-sm sm:p-4 overflow-hidden"
@@ -645,17 +798,58 @@ export default function AdminPage() {
                     autoFocus
                   />
                 </div>
+
+                {/* Category Selection with Instant + New Category Option */}
                 <div>
-                  <label className="block text-[11px] sm:text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Category</label>
-                  <select
-                    value={menuForm.category}
-                    onChange={(e) => setMenuForm({ ...menuForm, category: e.target.value })}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-medium text-xs sm:text-sm text-slate-900 focus:outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 appearance-none"
-                  >
-                    {categories.filter((c) => c !== "All").map((cat) => (
-                      <option key={cat} value={cat}>{cat}</option>
-                    ))}
-                  </select>
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="block text-[11px] sm:text-xs font-bold text-slate-500 uppercase tracking-wider">
+                      Category *
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCreatingNewCategory(!isCreatingNewCategory);
+                        setNewCategoryInput("");
+                      }}
+                      className="text-[11px] font-bold text-orange-600 hover:text-orange-700 transition-colors flex items-center gap-1"
+                    >
+                      {isCreatingNewCategory ? "← Choose Existing" : "+ New Category"}
+                    </button>
+                  </div>
+
+                  {isCreatingNewCategory ? (
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={newCategoryInput}
+                        onChange={(e) => setNewCategoryInput(e.target.value)}
+                        placeholder="e.g. Fresh Juices, Desserts..."
+                        className="w-full bg-orange-50/60 border-2 border-orange-300 rounded-xl px-4 py-3 font-bold text-xs sm:text-sm text-slate-900 focus:outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20"
+                        autoFocus
+                      />
+                      <Tag className="w-4 h-4 text-orange-400 absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    </div>
+                  ) : (
+                    <select
+                      value={menuForm.category}
+                      onChange={(e) => {
+                        if (e.target.value === "__NEW_CATEGORY__") {
+                          setIsCreatingNewCategory(true);
+                          setNewCategoryInput("");
+                        } else {
+                          setMenuForm({ ...menuForm, category: e.target.value });
+                        }
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 font-medium text-xs sm:text-sm text-slate-900 focus:outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/20 appearance-none cursor-pointer"
+                    >
+                      {categories.filter((c) => c !== "All").map((cat) => (
+                        <option key={cat} value={cat}>{cat}</option>
+                      ))}
+                      <option value="__NEW_CATEGORY__" className="text-orange-600 font-bold">
+                        ➕ Add New Category...
+                      </option>
+                    </select>
+                  )}
                 </div>
               </div>
 

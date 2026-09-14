@@ -23,7 +23,6 @@ interface MenuItemCardProps {
     onAddToCart: (item: MenuItem, selectedSize: "Regular" | "Large", finalPrice: number) => void;
 }
 
-// Lag එක වැළැක්වීමට w=300 & q=60 (Ultra-light thumbnail sizes)
 const CATEGORY_IMAGES: Record<string, string> = {
     "Fried Rice (Keeri Samba)": "https://images.unsplash.com/photo-1603133872878-684f208fb84b?w=300&q=60&auto=format&fit=crop",
     "Fried Rice (Basmathi)": "https://images.unsplash.com/photo-1563379091339-03b21ab4a4f8?w=300&q=60&auto=format&fit=crop",
@@ -58,7 +57,6 @@ export default function MenuItemCard({ item, currencySymbol = "LKR", onAddToCart
     return (
         <div className="bg-white rounded-2xl p-3 shadow-sm border border-slate-100 flex flex-col justify-between hover:border-orange-200 transition-colors [contain:content]">
             <div>
-                {/* Optimized Image Box */}
                 <div className="relative h-28 w-full rounded-xl overflow-hidden mb-2 bg-slate-100">
                     <img
                         src={displayImage}
@@ -103,8 +101,8 @@ export default function MenuItemCard({ item, currencySymbol = "LKR", onAddToCart
                             type="button"
                             onClick={() => setSelectedSize("Regular")}
                             className={`flex-1 text-xs py-1 rounded-lg font-bold transition-colors ${selectedSize === "Regular"
-                                    ? "bg-white text-orange-600 shadow-sm"
-                                    : "text-slate-500 hover:text-slate-700"
+                                ? "bg-white text-orange-600 shadow-sm"
+                                : "text-slate-500 hover:text-slate-700"
                                 }`}
                         >
                             Regular
@@ -113,8 +111,8 @@ export default function MenuItemCard({ item, currencySymbol = "LKR", onAddToCart
                             type="button"
                             onClick={() => setSelectedSize("Large")}
                             className={`flex-1 text-xs py-1 rounded-lg font-bold transition-colors ${selectedSize === "Large"
-                                    ? "bg-white text-orange-600 shadow-sm"
-                                    : "text-slate-500 hover:text-slate-700"
+                                ? "bg-white text-orange-600 shadow-sm"
+                                : "text-slate-500 hover:text-slate-700"
                                 }`}
                         >
                             Large
@@ -124,7 +122,6 @@ export default function MenuItemCard({ item, currencySymbol = "LKR", onAddToCart
                     <div className="h-6 mb-2" />
                 )}
 
-                {/* Dynamic Currency Display */}
                 <div className="flex items-center justify-between pt-2 border-t border-slate-100">
                     <div className="flex items-baseline gap-1">
                         <span className="text-[11px] font-bold text-slate-400">
